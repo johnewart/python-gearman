@@ -25,8 +25,8 @@ class GearmanJobRequest(object):
         self.priority = initial_priority
         self.background = background
 
-        self.connection_attempts = 0
-        self.max_connection_attempts = max_attempts
+        self.submission_attempts = 0
+        self.max_submission_attempts = max_attempts
 
         self.initialize_request()
 
@@ -78,6 +78,25 @@ class GearmanJobRequest(object):
         actually_complete = background_complete or foreground_complete
         return actually_complete
 
+    @property
+    def successful(self):
+        """Added in 2.0.2"""
+        background_complete = bool(self.background and self.state == JOB_CREATED)
+        foreground_complete = bool(not self.background and self.state == JOB_COMPLETE)
+
+        actually_complete = background_complete or foreground_complete
+        return actually_complete
+
+    @property
+    def connection_attempts(self):
+        """Deprecated since 2.0.2, removing in next major release"""
+        return self.submission_attempts
+
+    @property
+    def max_connection_attempts(self):
+        """Deprecated since 2.0.2, removing in next major release"""
+        return self.max_submission_attempts
+
     def __repr__(self):
-        formatted_representation = '<GearmanJobRequest task=%r, unique=%r, priority=%r, background=%r, state=%r, timed_out=%r>'
-        return formatted_representation % (self.job.task, self.job.unique, self.priority, self.background, self.state, self.timed_out)
+        formatted_representation = '<GearmanJobRequest task=%r, unique=%r, priority=%r, background=%r, state=%r, timed_out=%r, attempts=%r>'
+        return formatted_representation % (self.job.task, self.job.unique, self.priority, self.background, self.state, self.timed_out, self.submission_attempts)

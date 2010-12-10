@@ -6,7 +6,7 @@ from gearman.client import GearmanClient
 from gearman.client_handler import GearmanClientCommandHandler
 
 from gearman.constants import PRIORITY_NONE, PRIORITY_HIGH, PRIORITY_LOW, JOB_UNKNOWN, JOB_PENDING, JOB_CREATED, JOB_FAILED, JOB_COMPLETE
-from gearman.errors import ExceededConnectionAttempts, ServerUnavailable, InvalidClientState
+from gearman.errors import ExceededSubmissionAttempts, ServerUnavailable, InvalidClientState
 from gearman.protocol import submit_cmd_for_background_priority, GEARMAN_COMMAND_STATUS_RES, GEARMAN_COMMAND_GET_STATUS, GEARMAN_COMMAND_JOB_CREATED, \
     GEARMAN_COMMAND_WORK_STATUS, GEARMAN_COMMAND_WORK_FAIL, GEARMAN_COMMAND_WORK_COMPLETE, GEARMAN_COMMAND_WORK_DATA, GEARMAN_COMMAND_WORK_WARNING
 
@@ -100,10 +100,11 @@ class ClientTest(_GearmanAbstractTest):
         # All failed connections == death
         self.assertRaises(ServerUnavailable, self.connection_manager.establish_request_connection, current_request)
 
-    def test_auto_retry_behavior(self):
+    def test_auto_retry_on_connection_failure(self):
         current_request = self.generate_job_request(submitted=False, accepted=False)
+        current_handle = current_request.job.handle
 
-        def fail_then_create_jobs(rx_conns, wr_conns, ex_conns):
+        def connection_failure_then_resubmit_jobs(rx_conns, wr_conns, ex_conns):
             if self.connection_manager.current_failures < self.connection_manager.expected_failures:
                 self.connection_manager.current_failures += 1
 
@@ -117,31 +118,70 @@ class ClientTest(_GearmanAbstractTest):
                 self.connection_manager.establish_connection(self.connection)
             else:
                 self.assertEquals(current_request.state, JOB_PENDING)
-                self.command_handler.recv_command(GEARMAN_COMMAND_JOB_CREATED, job_handle=current_request.job.handle)
+                self.command_handler.recv_command(GEARMAN_COMMAND_JOB_CREATED, job_handle=current_handle)
 
             return rx_conns, wr_conns, ex_conns
 
-        self.connection_manager.handle_connection_activity = fail_then_create_jobs
+        self.connection_manager.handle_connection_activity = connection_failure_then_resubmit_jobs
         self.connection_manager.expected_failures = 5
 
-        # Now that we've setup our rety behavior, we need to reset the entire state of our experiment
+        # Now that we've setup our retry behavior, we need to reset the entire state of our experiment
         # First pass should succeed as we JUST touch our max attempts
-        self.connection_manager.current_failures = current_request.connection_attempts = 0
-        current_request.max_connection_attempts = self.connection_manager.expected_failures + 1
+        self.connection_manager.current_failures = current_request.submission_attempts = 0
+        current_request.max_submission_attempts = self.connection_manager.expected_failures + 1
         current_request.state = JOB_UNKNOWN
 
-        accepted_jobs = self.connection_manager.wait_until_jobs_accepted([current_request])
+        accepted_jobs = self.connection_manager.submit_multiple_requests([current_request], wait_until_complete=False)
         self.assertEquals(current_request.state, JOB_CREATED)
-        self.assertEquals(current_request.connection_attempts, current_request.max_connection_attempts)
+        self.assertEquals(current_request.submission_attempts, current_request.max_submission_attempts)
 
         # Second pass should fail as we JUST exceed our max attempts
-        self.connection_manager.current_failures = current_request.connection_attempts = 0
-        current_request.max_connection_attempts = self.connection_manager.expected_failures
+        self.connection_manager.current_failures = 0
+        current_request.reset()
+        current_request.submission_attempts = 0
+        current_request.max_submission_attempts = self.connection_manager.expected_failures
+
+        self.assertRaises(ExceededSubmissionAttempts, self.connection_manager.submit_multiple_requests, [current_request])
+        self.assertEquals(current_request.state, JOB_UNKNOWN)
+        self.assertEquals(current_request.submission_attempts, current_request.max_submission_attempts)
+
+    def test_auto_retry_on_job_failure(self):
+        current_request = self.generate_job_request(submitted=False, accepted=False)
+        current_handle = current_request.job.handle
+        def work_failure_then_resubmit_jobs(rx_conns, wr_conns, ex_conns):
+            if self.connection_manager.current_failures < self.connection_manager.expected_failures:
+                self.connection_manager.current_failures += 1
+                self.command_handler.recv_command(GEARMAN_COMMAND_JOB_CREATED, job_handle=current_handle)
+                self.command_handler.recv_command(GEARMAN_COMMAND_WORK_FAIL, job_handle=current_handle)
+            else:
+                self.assertEquals(current_request.state, JOB_PENDING)
+                self.command_handler.recv_command(GEARMAN_COMMAND_JOB_CREATED, job_handle=current_handle)
+                self.command_handler.recv_command(GEARMAN_COMMAND_WORK_COMPLETE, job_handle=current_handle, data='')
+
+            return rx_conns, wr_conns, ex_conns
+
+        self.connection_manager.handle_connection_activity = work_failure_then_resubmit_jobs
+        self.connection_manager.expected_failures = 5
+
+        # Now that we've setup our retry behavior, we need to reset the entire state of our experiment
+        # First pass should succeed as we JUST touch our max attempts
+        self.connection_manager.current_failures = current_request.submission_attempts = 0
+        current_request.max_submission_attempts = self.connection_manager.expected_failures + 1
         current_request.state = JOB_UNKNOWN
 
-        self.assertRaises(ExceededConnectionAttempts, self.connection_manager.wait_until_jobs_accepted, [current_request])
+        accepted_jobs = self.connection_manager.submit_multiple_requests([current_request])
+        self.assertEquals(current_request.state, JOB_COMPLETE)
+        self.assertEquals(current_request.submission_attempts, current_request.max_submission_attempts)
+
+        # Second pass should fail as we JUST exceed our max attempts
+        self.connection_manager.current_failures = 0
+        current_request.reset()
+        current_request.submission_attempts = 0
+        current_request.max_submission_attempts = self.connection_manager.expected_failures
+
+        self.assertRaises(ExceededSubmissionAttempts, self.connection_manager.submit_multiple_requests, [current_request])
         self.assertEquals(current_request.state, JOB_UNKNOWN)
-        self.assertEquals(current_request.connection_attempts, current_request.max_connection_attempts)
+        self.assertEquals(current_request.submission_attempts, current_request.max_submission_attempts)
 
     def test_multiple_fg_job_submission(self):
         submitted_job_count = 5

@@ -9,7 +9,7 @@ import gearman.util
 from gearman.connection_manager import GearmanConnectionManager
 from gearman.client_handler import GearmanClientCommandHandler
 from gearman.constants import PRIORITY_NONE, PRIORITY_LOW, PRIORITY_HIGH, JOB_UNKNOWN, JOB_PENDING
-from gearman.errors import ConnectionError, ExceededConnectionAttempts, ServerUnavailable
+from gearman.errors import ConnectionError, ExceededSubmissionAttempts, ServerUnavailable
 
 gearman_logger = logging.getLogger(__name__)
 
@@ -31,21 +31,29 @@ class GearmanClient(GearmanConnectionManager):
         # Ignores the fact if a request has been bound to a connection or not
         self.request_to_rotating_connection_queue = compat.defaultdict(collections.deque)
 
-    def submit_job(self, task, data, unique=None, priority=PRIORITY_NONE, background=False, wait_until_complete=True, max_retries=0, poll_timeout=None):
-        """Submit a single job to any gearman server"""
+    def submit_job(self, task, data, unique=None, priority=PRIORITY_NONE, background=False, wait_until_complete=True, max_retries=None, max_attempts=None, poll_timeout=None):
+        """Submit a single job to any gearman server
+
+        max_retries - Deprecated since 2.0.2, removing in next major release
+        max_attempts - Added in 2.0.2, successor to max_retries
+        """
         job_info = dict(task=task, data=data, unique=unique, priority=priority)
-        completed_job_list = self.submit_multiple_jobs([job_info], background=background, wait_until_complete=wait_until_complete, max_retries=max_retries, poll_timeout=poll_timeout)
+        completed_job_list = self.submit_multiple_jobs([job_info], background=background, wait_until_complete=wait_until_complete, \
+            max_retries=max_retries, max_attempts=max_attempts, poll_timeout=poll_timeout)
+
         return gearman.util.unlist(completed_job_list)
 
-    def submit_multiple_jobs(self, jobs_to_submit, background=False, wait_until_complete=True, max_retries=0, poll_timeout=None):
+    def submit_multiple_jobs(self, jobs_to_submit, background=False, wait_until_complete=True, max_retries=None, max_attempts=None, poll_timeout=None):
         """Takes a list of jobs_to_submit with dicts of
 
         {'task': task, 'data': data, 'unique': unique, 'priority': priority}
+
+        max_retries - Deprecated since 2.0.2, removing in next major release
+        max_attempts - Added in 2.0.2, successor to max_retries
         """
         assert type(jobs_to_submit) in (list, tuple, set), "Expected multiple jobs, received 1?"
 
-        # Convert all job dicts to job request objects
-        requests_to_submit = [self._create_request_from_dictionary(job_info, background=background, max_retries=max_retries) for job_info in jobs_to_submit]
+        requests_to_submit = [self._create_request_from_dictionary(job_info, background=background, max_retries=max_retries, max_attempts=max_attempts) for job_info in jobs_to_submit]
 
         return self.submit_multiple_requests(requests_to_submit, wait_until_complete=wait_until_complete, poll_timeout=poll_timeout)
 
@@ -59,17 +67,32 @@ class GearmanClient(GearmanConnectionManager):
         """
         assert type(job_requests) in (list, tuple, set), "Expected multiple job requests, received 1?"
         stopwatch = gearman.util.Stopwatch(poll_timeout)
+        if not job_requests:
+            return job_requests
 
         # We should always wait until our job is accepted, this should be fast
         time_remaining = stopwatch.get_time_remaining()
-        processed_requests = self.wait_until_jobs_accepted(job_requests, poll_timeout=time_remaining)
+        job_requests = self.wait_until_jobs_accepted(job_requests, poll_timeout=time_remaining)
+
+        if not wait_until_complete:
+            return job_requests
 
         # Optionally, we'll allow a user to wait until all jobs are complete with the same poll_timeout
         time_remaining = stopwatch.get_time_remaining()
-        if wait_until_complete and bool(time_remaining != 0.0):
-            processed_requests = self.wait_until_jobs_completed(processed_requests, poll_timeout=time_remaining)
+        if bool(time_remaining != 0.0):
+            job_requests = self.wait_until_jobs_completed(job_requests, poll_timeout=time_remaining)
 
-        return processed_requests
+        # We want to forcibly retry jobs that have failed
+        requests_to_retry = []
+        for current_request in job_requests:
+            if not current_request.successful and not current_request.timed_out:
+                current_request.reset()
+                requests_to_retry.append(current_request)
+
+        if requests_to_retry:
+            self.submit_multiple_requests(requests_to_retry, wait_until_complete=wait_until_complete, poll_timeout=stopwatch.get_time_remaining())
+
+        return job_requests
 
     def wait_until_jobs_accepted(self, job_requests, poll_timeout=None):
         """Go into a select loop until all our jobs have moved to STATE_PENDING"""
@@ -163,8 +186,12 @@ class GearmanClient(GearmanConnectionManager):
 
         return job_requests
 
-    def _create_request_from_dictionary(self, job_info, background=False, max_retries=0):
-        """Takes a dictionary with fields  {'task': task, 'unique': unique, 'data': data, 'priority': priority, 'background': background}"""
+    def _create_request_from_dictionary(self, job_info, background=False, max_retries=None, max_attempts=None):
+        """Takes a dictionary with fields  {'task': task, 'unique': unique, 'data': data, 'priority': priority, 'background': background}
+
+        max_retries - Deprecated since 2.0.2, removing in next major release
+        max_attempts - Added in 2.0.2, successor to max_retries
+        """
         # Make sure we have a unique identifier for ALL our tasks
         job_unique = job_info.get('unique')
         if job_unique == '-':
@@ -176,8 +203,17 @@ class GearmanClient(GearmanConnectionManager):
 
         initial_priority = job_info.get('priority', PRIORITY_NONE)
 
-        max_attempts = max_retries + 1
-        current_request = self.job_request_class(current_job, initial_priority=initial_priority, background=background, max_attempts=max_attempts)
+        if max_retries is not None and max_attempts is not None:
+            raise ValueError("Cannot set both max_retries and max_attempts")
+        elif max_retries is None and max_attempts is None:
+            actual_max_attempts = 1
+        elif max_retries:
+            actual_max_attempts = max_retries + 1
+        else:
+            actual_max_attempts = max_attempts
+
+        # Convert all job dicts to job request objects
+        current_request = self.job_request_class(current_job, initial_priority=initial_priority, background=background, max_attempts=actual_max_attempts)
         return current_request
 
     def establish_request_connection(self, current_request):
@@ -210,13 +246,13 @@ class GearmanClient(GearmanConnectionManager):
 
     def send_job_request(self, current_request):
         """Attempt to send out a job request"""
-        if current_request.connection_attempts >= current_request.max_connection_attempts:
-            raise ExceededConnectionAttempts('Exceeded %d connection attempt(s) :: %r' % (current_request.max_connection_attempts, current_request))
+        if current_request.submission_attempts >= current_request.max_submission_attempts:
+            raise ExceededSubmissionAttempts('Exceeded %d attempt(s) :: %r' % (current_request.max_submission_attempts, current_request))
 
         chosen_connection = self.establish_request_connection(current_request)
 
         current_request.job.connection = chosen_connection
-        current_request.connection_attempts += 1
+        current_request.submission_attempts += 1
         current_request.timed_out = False
 
         current_command_handler = self.connection_to_handler_map[chosen_connection]
