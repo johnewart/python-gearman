@@ -8,7 +8,7 @@ import gearman.util
 
 from gearman.connection_manager import GearmanConnectionManager
 from gearman.client_handler import GearmanClientCommandHandler
-from gearman.constants import PRIORITY_NONE, PRIORITY_LOW, PRIORITY_HIGH, JOB_UNKNOWN, JOB_PENDING
+from gearman.constants import PRIORITY_NONE, PRIORITY_LOW, PRIORITY_HIGH, JOB_UNKNOWN, JOB_PENDING, JOB_FAILED
 from gearman.errors import ConnectionError, ExceededSubmissionAttempts, ServerUnavailable
 
 gearman_logger = logging.getLogger(__name__)
@@ -74,23 +74,10 @@ class GearmanClient(GearmanConnectionManager):
         time_remaining = stopwatch.get_time_remaining()
         job_requests = self.wait_until_jobs_accepted(job_requests, poll_timeout=time_remaining)
 
-        if not wait_until_complete:
-            return job_requests
-
         # Optionally, we'll allow a user to wait until all jobs are complete with the same poll_timeout
         time_remaining = stopwatch.get_time_remaining()
-        if bool(time_remaining != 0.0):
+        if wait_until_complete and bool(time_remaining != 0.0):
             job_requests = self.wait_until_jobs_completed(job_requests, poll_timeout=time_remaining)
-
-        # We want to forcibly retry jobs that have failed
-        requests_to_retry = []
-        for current_request in job_requests:
-            if not current_request.successful and not current_request.timed_out:
-                current_request.reset()
-                requests_to_retry.append(current_request)
-
-        if requests_to_retry:
-            self.submit_multiple_requests(requests_to_retry, wait_until_complete=wait_until_complete, poll_timeout=stopwatch.get_time_remaining())
 
         return job_requests
 
@@ -118,32 +105,38 @@ class GearmanClient(GearmanConnectionManager):
 
         return job_requests
 
-    def wait_until_jobs_completed(self, job_requests, poll_timeout=None):
-        """Go into a select loop until all our jobs have completed or failed"""
+    def wait_until_jobs_successful(self, job_requests, poll_timeout=None):
+        """Go into a select loop until all our jobs have completed or failed
+
+        Added in 2.0.2, successor to wait_until_jobs_complete
+        """
         assert type(job_requests) in (list, tuple, set), "Expected multiple job requests, received 1?"
 
-        def is_request_incomplete(current_request):
-            return not current_request.complete
+        def is_request_unsuccessful(current_request):
+            return not current_request.successful
 
         # Poll until we get responses for all our functions
-        # Do NOT attempt to auto-retry connection failures as we have no idea how for a worker got
-        def continue_while_jobs_incomplete(any_activity):
+        def continue_while_jobs_unsuccessful(any_activity):
             for current_request in job_requests:
-                if is_request_incomplete(current_request) and current_request.state != JOB_UNKNOWN:
-                    return True
+                requires_retry = is_request_unsuccessful(current_request) and bool(current_request.state == JOB_FAILED)
+                if requires_retry:
+                    self.send_job_request(current_request)
 
-            return False
+            return compat.any(is_request_unsuccessful(current_request) for current_request in job_requests)
 
-        self.poll_connections_until_stopped(self.connection_list, continue_while_jobs_incomplete, timeout=poll_timeout)
+        self.poll_connections_until_stopped(self.connection_list, continue_while_jobs_unsuccessful, timeout=poll_timeout)
 
         # Mark any job still in the queued state to poll_timeout
         for current_request in job_requests:
-            current_request.timed_out = is_request_incomplete(current_request)
+            current_request.timed_out = is_request_unsuccessful(current_request)
 
             if not current_request.timed_out:
                 self.request_to_rotating_connection_queue.pop(current_request, None)
 
         return job_requests
+
+    # Deprecated since 2.0.1, removing in next major release
+    wait_until_jobs_completed = wait_until_jobs_successful
 
     def get_job_status(self, current_request, poll_timeout=None):
         """Fetch the job status of a single request"""
@@ -247,14 +240,19 @@ class GearmanClient(GearmanConnectionManager):
     def send_job_request(self, current_request):
         """Attempt to send out a job request"""
         if current_request.submission_attempts >= current_request.max_submission_attempts:
-            raise ExceededSubmissionAttempts('Exceeded %d attempt(s) :: %r' % (current_request.max_submission_attempts, current_request))
+            return self.on_submission_attempts_exceeded(current_request)
 
         chosen_connection = self.establish_request_connection(current_request)
 
         current_request.job.connection = chosen_connection
+        current_request.state = JOB_UNKNOWN
         current_request.submission_attempts += 1
         current_request.timed_out = False
 
         current_command_handler = self.connection_to_handler_map[chosen_connection]
         current_command_handler.send_job_request(current_request)
         return current_request
+
+    def on_submission_attempts_exceeded(self, current_request):
+        """Reveal how we handle submission_attempts_exceeded.  Allows deriving clients to change this behavior."""
+        raise ExceededSubmissionAttempts(current_request)

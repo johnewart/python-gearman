@@ -32,7 +32,7 @@ class ClientTest(_GearmanAbstractTest):
         current_request = super(ClientTest, self).generate_job_request()
         if submitted or accepted:
             self.connection_manager.establish_request_connection(current_request)
-            self.command_handler.send_job_request(current_request)
+            self.connection_manager.send_job_request(current_request)
 
         if submitted and accepted:
             self.command_handler.recv_command(GEARMAN_COMMAND_JOB_CREATED, job_handle=current_request.job.handle)
@@ -180,7 +180,7 @@ class ClientTest(_GearmanAbstractTest):
         current_request.max_submission_attempts = self.connection_manager.expected_failures
 
         self.assertRaises(ExceededSubmissionAttempts, self.connection_manager.submit_multiple_requests, [current_request])
-        self.assertEquals(current_request.state, JOB_UNKNOWN)
+        self.assertEquals(current_request.state, JOB_FAILED)
         self.assertEquals(current_request.submission_attempts, current_request.max_submission_attempts)
 
     def test_multiple_fg_job_submission(self):
@@ -241,14 +241,11 @@ class ClientTest(_GearmanAbstractTest):
         self.assertFalse(job_request.complete)
         self.assertTrue(job_request.timed_out)
 
-    def test_wait_for_multiple_jobs_to_complete_or_timeout(self):
+    def test_wait_for_multiple_jobs_to_complete(self):
         completed_request = self.generate_job_request()
         failed_request = self.generate_job_request()
-        timeout_request = self.generate_job_request()
 
-        completed_request.state = JOB_CREATED
-        failed_request.state = JOB_CREATED
-        timeout_request.state = JOB_CREATED
+        all_requests = [completed_request, failed_request]
 
         self.update_requests = True
         def multiple_job_updates(rx_conns, wr_conns, ex_conns):
@@ -261,24 +258,33 @@ class ClientTest(_GearmanAbstractTest):
             return rx_conns, wr_conns, ex_conns
 
         self.connection_manager.handle_connection_activity = multiple_job_updates
+        try:
+            all_requests = self.connection_manager.wait_until_jobs_completed(all_requests)
+            assert False, "ExceededSubmissionAttempts not raised"
+        except ExceededSubmissionAttempts, request_exception:
+            exceptional_request = request_exception[0]
+            self.assert_jobs_equal(exceptional_request.job, failed_request.job)
 
-        finished_requests = self.connection_manager.wait_until_jobs_completed([completed_request, failed_request, timeout_request], poll_timeout=0.01)
-        del self.update_requests
+        self.assertEqual(completed_request.state, JOB_COMPLETE)
+        self.assertEqual(completed_request.result, '12345')
+        self.assertFalse(completed_request.timed_out)
 
-        finished_completed_request, finished_failed_request, finished_timeout_request = finished_requests
-        self.assert_jobs_equal(finished_completed_request.job, completed_request.job)
-        self.assertEqual(finished_completed_request.state, JOB_COMPLETE)
-        self.assertEqual(finished_completed_request.result, '12345')
-        self.assertFalse(finished_completed_request.timed_out)
+        self.assertEqual(failed_request.state, JOB_FAILED)
+        self.assertEqual(failed_request.result, None)
+        self.assertFalse(failed_request.timed_out)
 
-        self.assert_jobs_equal(finished_failed_request.job, failed_request.job)
-        self.assertEqual(finished_failed_request.state, JOB_FAILED)
-        self.assertEqual(finished_failed_request.result, None)
-        self.assertFalse(finished_failed_request.timed_out)
+    def test_wait_for_timeout(self):
+        timeout_request = self.generate_job_request()
 
-        self.assertEqual(finished_timeout_request.state, JOB_CREATED)
-        self.assertEqual(finished_timeout_request.result, None)
-        self.assertTrue(finished_timeout_request.timed_out)
+        all_requests = self.connection_manager.wait_until_jobs_completed([timeout_request], poll_timeout=0.01)
+        def noop_job_update(rx_conns, wr_conns, ex_conns):
+            return rx_conns, wr_conns, ex_conns
+
+        self.connection_manager.handle_connection_activity = noop_job_update
+
+        self.assertEqual(timeout_request.state, JOB_CREATED)
+        self.assertEqual(timeout_request.result, None)
+        self.assertTrue(timeout_request.timed_out)
 
     def test_get_job_status(self):
         single_request = self.generate_job_request()
