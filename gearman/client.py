@@ -7,9 +7,11 @@ import random
 import gearman.util
 
 from gearman.connection_manager import GearmanConnectionManager
-from gearman.client_handler import GearmanClientCommandHandler
-from gearman.constants import PRIORITY_NONE, PRIORITY_LOW, PRIORITY_HIGH, JOB_UNKNOWN, JOB_PENDING
-from gearman.errors import ConnectionError, ExceededConnectionAttempts, ServerUnavailable
+from gearman import client_handler
+from gearman.client_handler import CLIENT_JOB_DISCONNECTED, CLIENT_JOB_EXCEPTION, CLIENT_JOB_DATA, CLIENT_JOB_WARNING, \
+    CLIENT_JOB_STATUS, CLIENT_JOB_CREATED, CLIENT_JOB_COMPLETE, CLIENT_JOB_FAIL, CLIENT_STATUS_RES, CLIENT_ERROR
+
+from gearman.constants import PRIORITY_NONE, PRIORITY_LOW, PRIORITY_HIGH, JOB_UNKNOWN, JOB_PENDING, JOB_COMPLETE, JOB_FAILED
 
 gearman_logger = logging.getLogger(__name__)
 
@@ -20,21 +22,52 @@ class GearmanClient(GearmanConnectionManager):
     """
     GearmanClient :: Interface to submit jobs to a Gearman server
     """
-    command_handler_class = GearmanClientCommandHandler
+    connection_class = client_handler.ClientConnection
 
     def __init__(self, host_list=None, random_unique_bytes=RANDOM_UNIQUE_BYTES):
         super(GearmanClient, self).__init__(host_list=host_list)
 
-        self.random_unique_bytes = random_unique_bytes
+        self._random_unique_bytes = random_unique_bytes
 
         # The authoritative copy of all requests that this client knows about
         # Ignores the fact if a request has been bound to a connection or not
-        self.request_to_rotating_connection_queue = compat.defaultdict(collections.deque)
+        self._request_to_handler_queue = {}
+
+        self._requests_pending_created = set()
+        self._requests_pending_data = set()
+        self._requests_pending_warning = set()
+        self._requests_pending_complete = set()
+        self._requests_pending_fail = set()
+        self._requests_pending_exception = set()
+        self._jobs_pending_status = set()
+
+        self._client_managed_sets = set([
+            id(self._requests_pending_created),
+            id(self._requests_pending_data),
+            id(self._requests_pending_warning),
+            id(self._requests_pending_complete),
+            id(self._requests_pending_fail),
+            id(self._jobs_pending_status),
+        ])
+
+    def _register_handler(self, current_handler):
+        super(GearmanClient, self)._register_handler(current_handler)
+        current_handler.add_command_listener(CLIENT_JOB_DISCONNECTED, self.on_job_disconnect)
+        current_handler.add_command_listener(CLIENT_JOB_EXCEPTION, self.on_job_exception)
+        current_handler.add_command_listener(CLIENT_JOB_DATA, self.on_job_data)
+        current_handler.add_command_listener(CLIENT_JOB_WARNING, self.on_job_warning)
+        current_handler.add_command_listener(CLIENT_JOB_STATUS, self.on_job_status)
+        current_handler.add_command_listener(CLIENT_JOB_COMPLETE, self.on_job_complete)
+        current_handler.add_command_listener(CLIENT_JOB_FAIL, self.on_job_fail)
+        current_handler.add_command_listener(CLIENT_STATUS_RES, self.on_status_update)
+        current_handler.add_command_listener(CLIENT_ERROR, self.on_gearman_error)
 
     def submit_job(self, task, data, unique=None, priority=PRIORITY_NONE, background=False, wait_until_complete=True, max_retries=0, poll_timeout=None):
         """Submit a single job to any gearman server"""
         job_info = dict(task=task, data=data, unique=unique, priority=priority)
+
         completed_job_list = self.submit_multiple_jobs([job_info], background=background, wait_until_complete=wait_until_complete, max_retries=max_retries, poll_timeout=poll_timeout)
+
         return gearman.util.unlist(completed_job_list)
 
     def submit_multiple_jobs(self, jobs_to_submit, background=False, wait_until_complete=True, max_retries=0, poll_timeout=None):
@@ -52,116 +85,124 @@ class GearmanClient(GearmanConnectionManager):
     def submit_multiple_requests(self, job_requests, wait_until_complete=True, poll_timeout=None):
         """Take GearmanJobRequests, assign them connections, and request that they be done.
 
-        * Blocks until our jobs are accepted (should be fast) OR times out
+        * Optionally blocks until our jobs are accepted (should be fast) OR times out
         * Optionally blocks until jobs are all complete
 
         You MUST check the status of your requests after calling this function as "timed_out" or "state == JOB_UNKNOWN" maybe True
         """
         assert type(job_requests) in (list, tuple, set), "Expected multiple job requests, received 1?"
-        stopwatch = gearman.util.Stopwatch(poll_timeout)
 
-        # We should always wait until our job is accepted, this should be fast
-        time_remaining = stopwatch.get_time_remaining()
-        processed_requests = self.wait_until_jobs_accepted(job_requests, poll_timeout=time_remaining)
+        for current_request in job_requests:
+            self._register_request(current_request)
+            self._send_job_request(current_request)
 
-        # Optionally, we'll allow a user to wait until all jobs are complete with the same poll_timeout
-        time_remaining = stopwatch.get_time_remaining()
-        if wait_until_complete and bool(time_remaining != 0.0):
-            processed_requests = self.wait_until_jobs_completed(processed_requests, poll_timeout=time_remaining)
+        if wait_until_complete:
+            job_requests = self.wait_until_jobs_completed(job_requests, poll_timeout=poll_timeout)
+        else:
+            job_requests = self.wait_until_jobs_accepted(job_requests, poll_timeout=poll_timeout)
 
-        return processed_requests
+        return job_requests
 
     def wait_until_jobs_accepted(self, job_requests, poll_timeout=None):
-        """Go into a select loop until all our jobs have moved to STATE_PENDING"""
-        assert type(job_requests) in (list, tuple, set), "Expected multiple job requests, received 1?"
-
-        def is_request_pending(current_request):
-            return bool(current_request.state == JOB_PENDING)
-
-        # Poll until we know we've gotten acknowledgement that our job's been accepted
-        # If our connection fails while we're waiting for it to be accepted, automatically retry right here
-        def continue_while_jobs_pending(any_activity):
-            for current_request in job_requests:
-                if current_request.state == JOB_UNKNOWN:
-                    self.send_job_request(current_request)
-
-            return compat.any(is_request_pending(current_request) for current_request in job_requests)
-
-        self.poll_connections_until_stopped(self.connection_list, continue_while_jobs_pending, timeout=poll_timeout)
-
-        # Mark any job still in the queued state to poll_timeout
-        for current_request in job_requests:
-            current_request.timed_out = is_request_pending(current_request)
-
-        return job_requests
+        return self._wait_while_requests_pending(job_requests, self._requests_pending_created, poll_timeout=poll_timeout)
 
     def wait_until_jobs_completed(self, job_requests, poll_timeout=None):
-        """Go into a select loop until all our jobs have completed or failed"""
-        assert type(job_requests) in (list, tuple, set), "Expected multiple job requests, received 1?"
+        return self._wait_while_requests_pending(job_requests, self._requests_pending_complete, poll_timeout=poll_timeout)
 
-        def is_request_incomplete(current_request):
-            return not current_request.complete
+    def _wait_while_requests_pending(self, job_requests, pending_request_set, poll_timeout=None):
+        """Go into a select loop until all our jobs have moved to STATE_PENDING"""
+        if type(job_requests) not in (tuple, list, set):
+            raise TypeError("'job_requests' must be of type (tuple, list, set)")
+        elif type(pending_request_set) != set:
+            raise TypeError("'pending_request_set' must be of type (set)")
+        elif id(pending_request_set) not in self._client_managed_sets:
+            raise ValueError("'pending_request_set' NOT being managed by this GearmanClient")
 
-        # Poll until we get responses for all our functions
-        # Do NOT attempt to auto-retry connection failures as we have no idea how for a worker got
-        def continue_while_jobs_incomplete(any_activity):
-            for current_request in job_requests:
-                if is_request_incomplete(current_request) and current_request.state != JOB_UNKNOWN:
-                    return True
+        # Promote our iterable of job_requests to a set for fast comparisons in the future
+        known_request_set = set(job_requests)
 
-            return False
+        # Add known requests to a "pending_request_set" automatically checked in self.on_job_*
+        pending_request_set |= known_request_set
 
-        self.poll_connections_until_stopped(self.connection_list, continue_while_jobs_incomplete, timeout=poll_timeout)
+        # Poll until we know our request is no longer pending (it's been evicted from the pending_request_set)
+        def continue_while_pending():
+            return bool(known_request_set & pending_request_set)
+
+        self._poll_until_stopped(continue_while_pending, timeout=poll_timeout)
 
         # Mark any job still in the queued state to poll_timeout
         for current_request in job_requests:
-            current_request.timed_out = is_request_incomplete(current_request)
+            current_request.timed_out = bool(current_request in pending_request_set)
 
-            if not current_request.timed_out:
-                self.request_to_rotating_connection_queue.pop(current_request, None)
-
+        # Evict our requests once we know we can longer wait for them
+        pending_request_set -= known_request_set
         return job_requests
+    # 
+    # def get_job_status(self, current_request, poll_timeout=None):
+    #     """Fetch the job status of a single request"""
+    #     request_list = self.get_job_statuses([current_request], poll_timeout=poll_timeout)
+    #     return gearman.util.unlist(request_list)
+    # 
+    # def get_job_statuses(self, job_requests, poll_timeout=None):
+    #     """Fetch the job status of a multiple requests"""
+    #     assert type(job_requests) in (list, tuple, set), "Expected multiple job requests, received 1?"
+    #     countdown_timer = gearman.util.CountdownTimer(poll_timeout)
+    # 
+    #     self.wait_until_handler_established(poll_timeout=countdown_timer.time_remaining)
+    # 
+    #     for current_request in job_requests:
+    #         current_request.status['last_time_received'] = current_request.status.get('time_received')
+    # 
+    #         current_handler = current_request.job.connection
+    #         current_handler.send_get_status_of_job(current_request)
+    # 
+    #     return self.wait_until_job_statuses_received(job_requests, poll_timeout=countdown_timer.time_remaining)
+    # 
+    # def wait_until_job_statuses_received(self, job_requests, poll_timeout=None):
+    #     """Go into a select loop until we received statuses on all our requests"""
+    #     assert type(job_requests) in (list, tuple, set), "Expected multiple job requests, received 1?"
+    #     def is_status_not_updated(current_request):
+    #         current_status = current_request.status
+    #         return bool(current_status.get('time_received') == current_status.get('last_time_received'))
+    # 
+    #     # Poll to make sure we send out our request for a status update
+    #     def continue_while_status_not_updated():
+    #         for current_request in job_requests:
+    #             if is_status_not_updated(current_request) and current_request.state != JOB_UNKNOWN:
+    #                 return True
+    # 
+    #         return False
+    # 
+    #     self._poll_until_stopped(continue_while_status_not_updated, timeout=poll_timeout)
+    # 
+    #     for current_request in job_requests:
+    #         current_request.status = current_request.status or {}
+    #         current_request.timed_out = is_status_not_updated(current_request)
+    # 
+    #     return job_requests
+    # 
+    # def wait_until_handler_established(self, connection_set, poll_timeout=None):
+    #     for current_handler in self._handler_pool:
+    #         if current_handler.disconnected:
+    #             current_handler.connect()
+    # 
+    #     # Poll to make sure we send out our request for a status update
+    #     self._poll_once(timeout=0.0)
+    # 
+    #     if not compat.any(current_handler.connected for current_handler in self._handler_pool):
+    #         raise errors.ServerUnavailable(self._handler_pool)
 
-    def get_job_status(self, current_request, poll_timeout=None):
-        """Fetch the job status of a single request"""
-        request_list = self.get_job_statuses([current_request], poll_timeout=poll_timeout)
-        return gearman.util.unlist(request_list)
+    def _register_request(self, current_request):
+        """When registering a request, keep track of which connections we've already tried submitting to"""
+        if current_request in self._request_to_handler_queue:
+            return
 
-    def get_job_statuses(self, job_requests, poll_timeout=None):
-        """Fetch the job status of a multiple requests"""
-        assert type(job_requests) in (list, tuple, set), "Expected multiple job requests, received 1?"
-        for current_request in job_requests:
-            current_request.status['last_time_received'] = current_request.status.get('time_received')
+        # Always start off this task on the same server if possible
+        shuffled_handlers = random.shuffle(list(self._handler_pool))
+        self._request_to_handler_queue[current_request] = collections.deque(shuffled_handlers)
 
-            current_connection = current_request.job.connection
-            current_command_handler = self.connection_to_handler_map[current_connection]
-
-            current_command_handler.send_get_status_of_job(current_request)
-
-        return self.wait_until_job_statuses_received(job_requests, poll_timeout=poll_timeout)
-
-    def wait_until_job_statuses_received(self, job_requests, poll_timeout=None):
-        """Go into a select loop until we received statuses on all our requests"""
-        assert type(job_requests) in (list, tuple, set), "Expected multiple job requests, received 1?"
-        def is_status_not_updated(current_request):
-            current_status = current_request.status
-            return bool(current_status.get('time_received') == current_status.get('last_time_received'))
-
-        # Poll to make sure we send out our request for a status update
-        def continue_while_status_not_updated(any_activity):
-            for current_request in job_requests:
-                if is_status_not_updated(current_request) and current_request.state != JOB_UNKNOWN:
-                    return True
-
-            return False
-
-        self.poll_connections_until_stopped(self.connection_list, continue_while_status_not_updated, timeout=poll_timeout)
-
-        for current_request in job_requests:
-            current_request.status = current_request.status or {}
-            current_request.timed_out = is_status_not_updated(current_request)
-
-        return job_requests
+    def _unregister_request(self, current_request):
+        self._request_to_handler_queue.pop(current_request, None)
 
     def _create_request_from_dictionary(self, job_info, background=False, max_retries=0):
         """Takes a dictionary with fields  {'task': task, 'unique': unique, 'data': data, 'priority': priority, 'background': background}"""
@@ -170,7 +211,7 @@ class GearmanClient(GearmanConnectionManager):
         if job_unique == '-':
             job_unique = job_info['data']
         elif not job_unique:
-            job_unique = os.urandom(self.random_unique_bytes).encode('hex')
+            job_unique = os.urandom(self._random_unique_bytes).encode('hex')
 
         current_job = self.job_class(connection=None, handle=None, task=job_info['task'], unique=job_unique, data=job_info['data'])
 
@@ -180,45 +221,62 @@ class GearmanClient(GearmanConnectionManager):
         current_request = self.job_request_class(current_job, initial_priority=initial_priority, background=background, max_attempts=max_attempts)
         return current_request
 
-    def establish_request_connection(self, current_request):
+    def _send_job_request(self, current_request):
+        """Attempt to send out a job request"""
+        chosen_handler = self._choose_handler(current_request)
+        chosen_handler.send_job_request(current_request)
+
+        current_request.timed_out = False
+        return current_request
+
+    def _choose_handler(self, current_request):
         """Return a live connection for the given hash"""
+        self._check_handlers()
+
         # We'll keep track of the connections we're attempting to use so if we ever have to retry, we can use this history
-        rotating_connections = self.request_to_rotating_connection_queue.get(current_request, None)
-        if not rotating_connections:
-            shuffled_connection_list = list(self.connection_list)
-            random.shuffle(shuffled_connection_list)
+        rotating_handlers = self._request_to_handler_queue[current_request]
 
-            rotating_connections = collections.deque(shuffled_connection_list)
-            self.request_to_rotating_connection_queue[current_request] = rotating_connections
-
-        failed_connections = 0
-        chosen_connection = None
-        for possible_connection in rotating_connections:
-            try:
-                chosen_connection = self.establish_connection(possible_connection)
+        failed_handlers = 0
+        chosen_handler = None
+        for possible_handler in rotating_handlers:
+            if possible_handler.connected:
+                chosen_handler = possible_handler
                 break
-            except ConnectionError:
-                # Rotate our server list so we'll skip all our broken servers
-                failed_connections += 1
 
-        if not chosen_connection:
-            raise ServerUnavailable('Found no valid connections: %r' % self.connection_list)
+            failed_handlers += 1
 
         # Rotate our server list so we'll skip all our broken servers
-        rotating_connections.rotate(-failed_connections)
-        return chosen_connection
+        rotating_handlers.rotate(-failed_handlers)
+        return chosen_handler
 
-    def send_job_request(self, current_request):
-        """Attempt to send out a job request"""
-        if current_request.connection_attempts >= current_request.max_connection_attempts:
-            raise ExceededConnectionAttempts('Exceeded %d connection attempt(s) :: %r' % (current_request.max_connection_attempts, current_request))
+    def on_job_disconnect(self, current_handler, current_request):
+        self.on_job_fail(current_request)
 
-        chosen_connection = self.establish_request_connection(current_request)
+    def on_job_created(self, current_handler, current_request):
+        self._requests_pending_created.discard(current_request)
 
-        current_request.job.connection = chosen_connection
-        current_request.connection_attempts += 1
-        current_request.timed_out = False
+    def on_job_status(self, current_handler, current_request):
+        pass
 
-        current_command_handler = self.connection_to_handler_map[chosen_connection]
-        current_command_handler.send_job_request(current_request)
-        return current_request
+    def on_job_data(self, current_handler, current_request):
+        self._requests_pending_data.discard(current_request)
+
+    def on_job_warning(self, current_handler, current_request):
+        self._requests_pending_warning.discard(current_request)
+
+    def on_job_complete(self, current_handler, current_request):
+        self._requests_pending_complete.discard(current_request)
+        self._unregister_request(current_request)
+
+    def on_job_fail(self, current_handler, current_request):
+        self._requests_pending_fail.discard(current_request)
+        if self._retry_on_failure:
+            self._send_job_request(current_request)
+        else:
+            self._unregister_request(current_request)
+
+    def on_job_exception(self, current_handler, current_request):
+        self._requests_pending_exception.discard(current_request)
+
+    def on_status_update(self, current_handler, job_info):
+        pass

@@ -51,6 +51,7 @@ GEARMAN_COMMAND_SUBMIT_JOB_LOW = 33
 GEARMAN_COMMAND_SUBMIT_JOB_LOW_BG = 34
 
 # Fake command code 
+GEARMAN_COMMAND_NO_COMMAND = -1
 GEARMAN_COMMAND_TEXT_COMMAND = 9999
 
 GEARMAN_PARAMS_FOR_COMMAND = {
@@ -100,47 +101,47 @@ GEARMAN_PARAMS_FOR_COMMAND = {
 }
 
 GEARMAN_COMMAND_TO_NAME = {
-    GEARMAN_COMMAND_CAN_DO: 'GEARMAN_COMMAND_CAN_DO',
-    GEARMAN_COMMAND_CANT_DO: 'GEARMAN_COMMAND_CANT_DO',
-    GEARMAN_COMMAND_RESET_ABILITIES: 'GEARMAN_COMMAND_RESET_ABILITIES',
-    GEARMAN_COMMAND_PRE_SLEEP: 'GEARMAN_COMMAND_PRE_SLEEP',
-    GEARMAN_COMMAND_NOOP: 'GEARMAN_COMMAND_NOOP',
-    GEARMAN_COMMAND_SUBMIT_JOB: 'GEARMAN_COMMAND_SUBMIT_JOB',
-    GEARMAN_COMMAND_JOB_CREATED: 'GEARMAN_COMMAND_JOB_CREATED',
-    GEARMAN_COMMAND_GRAB_JOB: 'GEARMAN_COMMAND_GRAB_JOB',
+    GEARMAN_COMMAND_CAN_DO: 'command_command_can_do',
+    GEARMAN_COMMAND_CANT_DO: 'command_cant_do',
+    GEARMAN_COMMAND_RESET_ABILITIES: 'command_reset_abilities',
+    GEARMAN_COMMAND_PRE_SLEEP: 'command_pre_sleep',
+    GEARMAN_COMMAND_NOOP: 'command_noop',
+    GEARMAN_COMMAND_SUBMIT_JOB: 'command_submit_job',
+    GEARMAN_COMMAND_JOB_CREATED: 'command_job_created',
+    GEARMAN_COMMAND_GRAB_JOB: 'command_grab_job',
 
     # Gearman commands 10-19
-    GEARMAN_COMMAND_NO_JOB: 'GEARMAN_COMMAND_NO_JOB',
-    GEARMAN_COMMAND_JOB_ASSIGN: 'GEARMAN_COMMAND_JOB_ASSIGN',
-    GEARMAN_COMMAND_WORK_STATUS: 'GEARMAN_COMMAND_WORK_STATUS',
-    GEARMAN_COMMAND_WORK_COMPLETE: 'GEARMAN_COMMAND_WORK_COMPLETE',
-    GEARMAN_COMMAND_WORK_FAIL: 'GEARMAN_COMMAND_WORK_FAIL',
-    GEARMAN_COMMAND_GET_STATUS: 'GEARMAN_COMMAND_GET_STATUS',
-    GEARMAN_COMMAND_ECHO_REQ: 'GEARMAN_COMMAND_ECHO_REQ',
-    GEARMAN_COMMAND_ECHO_RES: 'GEARMAN_COMMAND_ECHO_RES',
-    GEARMAN_COMMAND_SUBMIT_JOB_BG: 'GEARMAN_COMMAND_SUBMIT_JOB_BG',
-    GEARMAN_COMMAND_ERROR: 'GEARMAN_COMMAND_ERROR',
+    GEARMAN_COMMAND_NO_JOB: 'command_no_job',
+    GEARMAN_COMMAND_JOB_ASSIGN: 'command_job_assign',
+    GEARMAN_COMMAND_WORK_STATUS: 'command_work_status',
+    GEARMAN_COMMAND_WORK_COMPLETE: 'command_work_complete',
+    GEARMAN_COMMAND_WORK_FAIL: 'command_work_fail',
+    GEARMAN_COMMAND_GET_STATUS: 'command_get_status',
+    GEARMAN_COMMAND_ECHO_REQ: 'command_echo_req',
+    GEARMAN_COMMAND_ECHO_RES: 'command_echo_res',
+    GEARMAN_COMMAND_SUBMIT_JOB_BG: 'command_submit_job_bg',
+    GEARMAN_COMMAND_ERROR: 'command_error',
 
     # Gearman commands 20-29
-    GEARMAN_COMMAND_STATUS_RES: 'GEARMAN_COMMAND_STATUS_RES',
-    GEARMAN_COMMAND_SUBMIT_JOB_HIGH: 'GEARMAN_COMMAND_SUBMIT_JOB_HIGH',
-    GEARMAN_COMMAND_SET_CLIENT_ID: 'GEARMAN_COMMAND_SET_CLIENT_ID',
-    GEARMAN_COMMAND_CAN_DO_TIMEOUT: 'GEARMAN_COMMAND_CAN_DO_TIMEOUT',
-    GEARMAN_COMMAND_ALL_YOURS: 'GEARMAN_COMMAND_ALL_YOURS',
-    GEARMAN_COMMAND_WORK_EXCEPTION: 'GEARMAN_COMMAND_WORK_EXCEPTION',
-    GEARMAN_COMMAND_OPTION_REQ: 'GEARMAN_COMMAND_OPTION_REQ',
-    GEARMAN_COMMAND_OPTION_RES: 'GEARMAN_COMMAND_OPTION_RES',
-    GEARMAN_COMMAND_WORK_DATA: 'GEARMAN_COMMAND_WORK_DATA',
-    GEARMAN_COMMAND_WORK_WARNING: 'GEARMAN_COMMAND_WORK_WARNING',
+    GEARMAN_COMMAND_STATUS_RES: 'command_status_res',
+    GEARMAN_COMMAND_SUBMIT_JOB_HIGH: 'command_submit_job_high',
+    GEARMAN_COMMAND_SET_CLIENT_ID: 'command_set_client_id',
+    GEARMAN_COMMAND_CAN_DO_TIMEOUT: 'command_can_do_timeout',
+    GEARMAN_COMMAND_ALL_YOURS: 'command_all_yours',
+    GEARMAN_COMMAND_WORK_EXCEPTION: 'command_work_exception',
+    GEARMAN_COMMAND_OPTION_REQ: 'command_option_req',
+    GEARMAN_COMMAND_OPTION_RES: 'command_option_res',
+    GEARMAN_COMMAND_WORK_DATA: 'command_work_data',
+    GEARMAN_COMMAND_WORK_WARNING: 'command_work_warning',
 
     # Gearman commands 30-39
-    GEARMAN_COMMAND_GRAB_JOB_UNIQ: 'GEARMAN_COMMAND_GRAB_JOB_UNIQ',
-    GEARMAN_COMMAND_JOB_ASSIGN_UNIQ: 'GEARMAN_COMMAND_JOB_ASSIGN_UNIQ',
-    GEARMAN_COMMAND_SUBMIT_JOB_HIGH_BG: 'GEARMAN_COMMAND_SUBMIT_JOB_HIGH_BG',
-    GEARMAN_COMMAND_SUBMIT_JOB_LOW: 'GEARMAN_COMMAND_SUBMIT_JOB_LOW',
-    GEARMAN_COMMAND_SUBMIT_JOB_LOW_BG: 'GEARMAN_COMMAND_SUBMIT_JOB_LOW_BG',
+    GEARMAN_COMMAND_GRAB_JOB_UNIQ: 'command_grab_job_uniq',
+    GEARMAN_COMMAND_JOB_ASSIGN_UNIQ: 'command_job_assign_uniq',
+    GEARMAN_COMMAND_SUBMIT_JOB_HIGH_BG: 'command_submit_job_high_bg',
+    GEARMAN_COMMAND_SUBMIT_JOB_LOW: 'command_submit_job_low',
+    GEARMAN_COMMAND_SUBMIT_JOB_LOW_BG: 'command_submit_job_low_bg',
 
-    GEARMAN_COMMAND_TEXT_COMMAND: 'GEARMAN_COMMAND_TEXT_COMMAND'
+    GEARMAN_COMMAND_TEXT_COMMAND: 'command_text_command'
 }
 
 GEARMAN_SERVER_COMMAND_STATUS = 'status'
@@ -152,17 +153,18 @@ GEARMAN_SERVER_COMMAND_SHUTDOWN = 'shutdown'
 def get_command_name(cmd_type):
     return GEARMAN_COMMAND_TO_NAME.get(cmd_type, cmd_type)
 
+CMD_TYPE_LOOKUP = {
+    (True, PRIORITY_NONE): GEARMAN_COMMAND_SUBMIT_JOB_BG,
+    (True, PRIORITY_LOW): GEARMAN_COMMAND_SUBMIT_JOB_LOW_BG,
+    (True, PRIORITY_HIGH): GEARMAN_COMMAND_SUBMIT_JOB_HIGH_BG,
+    (False, PRIORITY_NONE): GEARMAN_COMMAND_SUBMIT_JOB,
+    (False, PRIORITY_LOW): GEARMAN_COMMAND_SUBMIT_JOB_LOW,
+    (False, PRIORITY_HIGH): GEARMAN_COMMAND_SUBMIT_JOB_HIGH
+}
+
 def submit_cmd_for_background_priority(background, priority):
-    cmd_type_lookup = {
-        (True, PRIORITY_NONE): GEARMAN_COMMAND_SUBMIT_JOB_BG,
-        (True, PRIORITY_LOW): GEARMAN_COMMAND_SUBMIT_JOB_LOW_BG,
-        (True, PRIORITY_HIGH): GEARMAN_COMMAND_SUBMIT_JOB_HIGH_BG,
-        (False, PRIORITY_NONE): GEARMAN_COMMAND_SUBMIT_JOB,
-        (False, PRIORITY_LOW): GEARMAN_COMMAND_SUBMIT_JOB_LOW,
-        (False, PRIORITY_HIGH): GEARMAN_COMMAND_SUBMIT_JOB_HIGH
-    }
     lookup_tuple = (background, priority)
-    cmd_type = cmd_type_lookup[lookup_tuple]
+    cmd_type = CMD_TYPE_LOOKUP[lookup_tuple]
     return cmd_type
 
 def parse_binary_command(in_buffer, is_response=True):
@@ -171,8 +173,8 @@ def parse_binary_command(in_buffer, is_response=True):
     """
     in_buffer_size = len(in_buffer)
     magic = None
-    cmd_type = None
-    cmd_args = None
+    cmd_type = GEARMAN_COMMAND_NO_COMMAND
+    cmd_args = {}
     cmd_len = 0
     expected_packet_size = None
 
@@ -197,7 +199,7 @@ def parse_binary_command(in_buffer, is_response=True):
     # If everything indicates this is a valid command, we should check to see if we have enough stuff to read in our buffer
     expected_packet_size = COMMAND_HEADER_SIZE + cmd_len
     if in_buffer_size < expected_packet_size:
-        return None, None, 0
+        return GEARMAN_COMMAND_NO_COMMAND, {}, 0
 
     binary_payload = in_buffer[COMMAND_HEADER_SIZE:expected_packet_size]
     split_arguments = []
@@ -251,8 +253,8 @@ def pack_binary_command(cmd_type, cmd_args, is_response=False):
 
 def parse_text_command(in_buffer):
     """Parse a text command and return a single line at a time"""
-    cmd_type = None
-    cmd_args = None
+    cmd_type = GEARMAN_COMMAND_NO_COMMAND
+    cmd_args = {}
     cmd_len = 0
     if '\n' not in in_buffer:
         return cmd_type, cmd_args, cmd_len

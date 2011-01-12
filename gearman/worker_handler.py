@@ -1,13 +1,14 @@
 import logging
 
-from gearman.command_handler import GearmanCommandHandler
+from gearman.connection import GearmanConnection, ConnectionError
+from gearman.job import GearmanJob
 from gearman.errors import InvalidWorkerState
 from gearman.protocol import GEARMAN_COMMAND_PRE_SLEEP, GEARMAN_COMMAND_RESET_ABILITIES, GEARMAN_COMMAND_CAN_DO, GEARMAN_COMMAND_SET_CLIENT_ID, GEARMAN_COMMAND_GRAB_JOB_UNIQ, \
     GEARMAN_COMMAND_WORK_STATUS, GEARMAN_COMMAND_WORK_COMPLETE, GEARMAN_COMMAND_WORK_FAIL, GEARMAN_COMMAND_WORK_EXCEPTION, GEARMAN_COMMAND_WORK_WARNING, GEARMAN_COMMAND_WORK_DATA
 
 gearman_logger = logging.getLogger(__name__)
 
-class GearmanWorkerCommandHandler(GearmanCommandHandler):
+class WorkerConnection(GearmanConnection):
     """GearmanWorker state machine on a per connection basis
 
     A worker can be in the following distinct states:
@@ -16,41 +17,52 @@ class GearmanWorkerCommandHandler(GearmanCommandHandler):
         AWAITING_JOB  -> Holding worker level job lock and awaiting a server response
         EXECUTING_JOB -> Transitional state (for ASSIGN_JOB)
     """
-    def __init__(self, connection_manager=None):
-        super(GearmanWorkerCommandHandler, self).__init__(connection_manager=connection_manager)
-
-        self._handler_abilities = []
+    def __init__(self, host=None, port=None):
+        super(WorkerConnection, self).__init__(host=host, port=port)
+        self._abilities = []
+        self._abilities_set = set()
         self._client_id = None
 
-    def initial_state(self, abilities=None, client_id=None):
-        self.set_client_id(client_id)
-        self.set_abilities(abilities)
-
+    def on_connect(self):
+        super(WorkerConnection, self).on_connect()
+        self.send_client_id(self._client_id)
+        self.send_abilities(self._abilities)
         self._sleep()
+
+    def on_disconnect(self):
+        self._handler_manager.set_job_lock(self, lock=False)
+        super(WorkerConnection, self).handle_disconnect()
 
     ##################################################################
     ##### Public interface methods to be called by GearmanWorker #####
     ##################################################################
     def set_abilities(self, connection_abilities_list):
         assert type(connection_abilities_list) in (list, tuple)
-        self._handler_abilities = connection_abilities_list
-
-        self.send_command(GEARMAN_COMMAND_RESET_ABILITIES)
-        for task in self._handler_abilities:
-            self.send_command(GEARMAN_COMMAND_CAN_DO, task=task)
+        self._abilities = connection_abilities_list
+        self._abilities_set = set(connection_abilities_list)
 
     def set_client_id(self, client_id):
         self._client_id = client_id
 
-        if self._client_id is not None:
-            self.send_command(GEARMAN_COMMAND_SET_CLIENT_ID, client_id=self._client_id)
-
     ###############################################################
     #### Convenience methods for typical gearman jobs to call #####
     ###############################################################
+    def send_abilities(self, list_of_abilities=None):
+        list_of_abilities = list_of_abilities or self._abilities
+        self.send_command(GEARMAN_COMMAND_RESET_ABILITIES)
+        for task in list_of_abilities:
+            self.send_command(GEARMAN_COMMAND_CAN_DO, task=task)
+
+    def send_client_id(self, client_id=None):
+        client_id = client_id or self._client_id
+        if not client_id:
+            return
+
+        self.send_command(GEARMAN_COMMAND_SET_CLIENT_ID, client_id=client_id)
+
     def send_job_status(self, current_job, numerator, denominator):
-        assert type(numerator) in (int, float), 'Numerator must be a numeric value'
-        assert type(denominator) in (int, float), 'Denominator must be a numeric value'
+        assert type(numerator) == int, 'Numerator must be a numeric value'
+        assert type(denominator) == int, 'Denominator must be a numeric value'
         self.send_command(GEARMAN_COMMAND_WORK_STATUS, job_handle=current_job.handle, numerator=str(numerator), denominator=str(denominator))
 
     def send_job_complete(self, current_job, data):
@@ -83,13 +95,13 @@ class GearmanWorkerCommandHandler(GearmanCommandHandler):
         self.send_command(GEARMAN_COMMAND_PRE_SLEEP)
 
     def _check_job_lock(self):
-        return self.connection_manager.check_job_lock(self)
+        return self._handler_manager.check_job_lock(self)
 
     def _acquire_job_lock(self):
-        return self.connection_manager.set_job_lock(self, lock=True)
+        return self._handler_manager.set_job_lock(self, lock=True)
 
     def _release_job_lock(self):
-        if not self.connection_manager.set_job_lock(self, lock=False):
+        if not self._handler_manager.set_job_lock(self, lock=False):
             raise InvalidWorkerState("Unable to release job lock for %r" % self)
 
         return True
@@ -125,16 +137,16 @@ class GearmanWorkerCommandHandler(GearmanCommandHandler):
 
         AWAITING_JOB -> EXECUTE_JOB -> SLEEP :: Always transition once we're given a job
         """
-        assert task in self._handler_abilities, '%s not found in %r' % (task, self._handler_abilities)
+        assert task in self._abilities_set, '%s not found in %r' % (task, self._abilities)
 
         # After this point, we know this connection handler is holding onto the job lock so we don't need to acquire it again
-        if not self.connection_manager.check_job_lock(self):
+        if not self._handler_manager.check_job_lock(self):
             raise InvalidWorkerState("Received a job when we weren't expecting one")
 
-        gearman_job = self.connection_manager.create_job(self, job_handle, task, unique, self.decode_data(data))
+        gearman_job = self._handler_manager.create_job(self, job_handle, task, unique, self.decode_data(data))
 
         # Create a new job
-        self.connection_manager.on_job_execute(gearman_job)
+        self._handler_manager.on_job_execute(gearman_job)
 
         # Release the job lock once we're doing and go back to sleep
         self._release_job_lock()

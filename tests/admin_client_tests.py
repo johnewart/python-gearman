@@ -1,7 +1,7 @@
 import unittest
 
 from gearman.admin_client import GearmanAdminClient, ECHO_STRING
-from gearman.admin_client_handler import GearmanAdminClientCommandHandler
+from gearman.connection import AdminConnection
 
 from gearman.errors import InvalidAdminClientState, ProtocolError
 from gearman.protocol import GEARMAN_COMMAND_ECHO_RES, GEARMAN_COMMAND_ECHO_REQ, GEARMAN_COMMAND_TEXT_COMMAND, \
@@ -15,7 +15,7 @@ class MockGearmanAdminClient(GearmanAdminClient, MockGearmanConnectionManager):
 class CommandHandlerStateMachineTest(_GearmanAbstractTest):
     """Test the public interface a GearmanWorker may need to call in order to update state on a GearmanWorkerCommandHandler"""
     connection_manager_class = MockGearmanAdminClient
-    command_handler_class = GearmanAdminClientCommandHandler
+    connection_class = AdminConnection
 
     def setUp(self):
         super(CommandHandlerStateMachineTest, self).setUp()

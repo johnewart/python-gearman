@@ -1,9 +1,6 @@
 class GearmanError(Exception):
     pass
 
-class ConnectionError(GearmanError):
-    pass
-
 class ServerUnavailable(GearmanError):
     pass
 

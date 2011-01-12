@@ -1,7 +1,7 @@
 import collections
 import logging
 
-from gearman.command_handler import GearmanCommandHandler
+from gearman.connection import GearmanConnection, ConnectionError
 from gearman.errors import ProtocolError, InvalidAdminClientState
 from gearman.protocol import GEARMAN_COMMAND_ECHO_REQ, GEARMAN_COMMAND_TEXT_COMMAND, \
     GEARMAN_SERVER_COMMAND_STATUS, GEARMAN_SERVER_COMMAND_VERSION, \
@@ -12,13 +12,13 @@ gearman_logger = logging.getLogger(__name__)
 EXPECTED_GEARMAN_SERVER_COMMANDS = set([GEARMAN_SERVER_COMMAND_STATUS, GEARMAN_SERVER_COMMAND_VERSION, \
     GEARMAN_SERVER_COMMAND_WORKERS, GEARMAN_SERVER_COMMAND_MAXQUEUE, GEARMAN_SERVER_COMMAND_SHUTDOWN])
 
-class GearmanAdminClientCommandHandler(GearmanCommandHandler):
+class AdminConnection(GearmanConnection):
     """Special GEARMAN_COMMAND_TEXT_COMMAND command handler that'll parse text responses from the server"""
     STATUS_FIELDS = 4
     WORKERS_FIELDS = 4
 
-    def __init__(self, connection_manager=None):
-        super(GearmanAdminClientCommandHandler, self).__init__(connection_manager=connection_manager)
+    def _reset_handler(self):
+        super(AdminConnection, self)._reset_handler()
         self._sent_commands = collections.deque()
         self._recv_responses = collections.deque()
 

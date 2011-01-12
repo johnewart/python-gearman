@@ -1,70 +1,147 @@
+import collections
+import errno
+import inspect
 import logging
-from gearman.errors import UnknownCommandError
-from gearman.protocol import get_command_name
+import socket
+import struct
+import time
+import sys
+
+from gearman import constants
+from gearman import errors
+from gearman import util
+from gearman import protocol
+from gearman.protocol import get_command_name, pack_binary_command, parse_binary_command, parse_text_command, pack_text_command
 
 gearman_logger = logging.getLogger(__name__)
 
+EVENT_DATA_READ = 'data_read'
+EVENT_DATA_SEND = 'data_send'
+
 class GearmanCommandHandler(object):
-    """A command handler manages the state which we should be in given a certain stream of commands
+    _is_server_side = False
+    _is_client_side = True
 
-    GearmanCommandHandler does no I/O and only understands sending/receiving commands
-    """
-    def __init__(self, connection_manager=None):
-        self.connection_manager = connection_manager
+    AVAILABLE_EVENTS = None
 
-    def initial_state(self, *largs, **kwargs):
-        """Called by a Connection Manager after we've been instantiated and we're ready to send off commands"""
+    def __init__(self,data_encoder=None):
+        self._data_encoder = None
+
+        self._command_callback_map = {}
+        self._event_broker = util.EventBroker(self, self.AVAILABLE_EVENTS)
+
+    def setup(self):
         pass
 
-    def on_io_error(self):
+    def teardown(self):
         pass
 
-    def decode_data(self, data):
-        """Convenience function :: handle binary string -> object unpacking"""
-        return self.connection_manager.data_encoder.decode(data)
+    #### Interaction with the raw socket ####
+    def listen(self, cmd_name, cmd_callback):
+        self._event_broker.listen(cmd_name, cmd_callback)
+
+    def unlisten(self, cmd_name, cmd_callback):
+        self._event_broker.unlisten(cmd_name, cmd_callback)
+
+    def _notify(self, command_event, *args, **kwargs):
+        self._event_broker.notify(command_event, *args, **kwargs)
+
+    def recv_data(self, data_stream):
+        current_data_stream = data_stream
+        bytes_read = 0
+
+        continue_to_process_commands = True
+        while continue_to_process_commands:
+            cmd_type, cmd_args, cmd_len = self._unpack_command(current_data_stream)
+            if cmd_type == protocol.GEARMAN_COMMAND_NO_COMMAND:
+                break
+
+            continue_to_process_commands = self.recv_command(cmd_type, cmd_args)
+
+            current_data_stream = current_data_stream[cmd_len:]
+            bytes_read += cmd_len
+
+        self._notify(EVENT_DATA_READ, bytes_read=bytes_read)
+
+    def recv_command(self, cmd_type, cmd_args):
+        """Reads data from socket --> buffer"""
+        # Cache our callback code so we can get improved QPS
+        cmd_callback = self._locate_command_callback(cmd_type, cmd_args)
+
+        # Expand the arguments as passed by the protocol
+        # This must match the parameter names as defined in the command handler
+        return cmd_callback(**cmd_args)
+
+    def send_command(self, cmd_type, **cmd_args):
+        data_stream = self._pack_command(cmd_type, cmd_args)
+        self.send_data(data_stream)
+
+    def send_data(self, data_stream):
+        self._notify(EVENT_DATA_SEND, data_stream=data_stream)
 
     def encode_data(self, data):
         """Convenience function :: handle object -> binary string packing"""
-        return self.connection_manager.data_encoder.encode(data)
+        return self._data_encoder.encode(data)
 
-    def fetch_commands(self):
-        """Called by a Connection Manager to notify us that we have pending commands"""
-        continue_working = True
-        while continue_working:
-            cmd_tuple = self.connection_manager.read_command(self)
-            if cmd_tuple is None:
-                break
+    def decode_data(self, data):
+        """Convenience function :: handle binary string -> object unpacking"""
+        return self._data_encoder.decode(data)
 
-            cmd_type, cmd_args = cmd_tuple
-            continue_working = self.recv_command(cmd_type, **cmd_args)
+    #### Interaction with commands ####
+    def _locate_command_callback(self, cmd_type, cmd_args):
+        cmd_callback = self._command_callback_map.get(cmd_type)
+        if cmd_callback:
+            return cmd_callback
 
-    def send_command(self, cmd_type, **cmd_args):
-        """Hand off I/O to the connection mananger"""
-        self.connection_manager.send_command(self, cmd_type, cmd_args)
-
-    def recv_command(self, cmd_type, **cmd_args):
-        """Maps any command to a recv_* callback function"""
-        completed_work = None
-
-        gearman_command_name = get_command_name(cmd_type)
-        if bool(gearman_command_name == cmd_type) or not gearman_command_name.startswith('GEARMAN_COMMAND_'):
+        gearman_command_name = protocol.get_command_name(cmd_type)
+        if bool(gearman_command_name == cmd_type) or not gearman_command_name.startswith('command_'):
             unknown_command_msg = 'Could not handle command: %r - %r' % (gearman_command_name, cmd_args)
             gearman_logger.error(unknown_command_msg)
             raise ValueError(unknown_command_msg)
 
-        recv_command_function_name = gearman_command_name.lower().replace('gearman_command_', 'recv_')
+        recv_command_function_name = gearman_command_name.lower().replace('command_', 'recv_')
 
         cmd_callback = getattr(self, recv_command_function_name, None)
         if not cmd_callback:
-            missing_callback_msg = 'Could not handle command: %r - %r' % (get_command_name(cmd_type), cmd_args)
+            missing_callback_msg = 'Could not handle command: %r - %r' % (protocol.get_command_name(cmd_type), cmd_args)
             gearman_logger.error(missing_callback_msg)
-            raise UnknownCommandError(missing_callback_msg)
+            raise errors.UnknownCommandError(missing_callback_msg)
 
-        # Expand the arguments as passed by the protocol
-        # This must match the parameter names as defined in the command handler
-        completed_work = cmd_callback(**cmd_args)
-        return completed_work
+        self._command_callback_map[cmd_type] = cmd_callback
+        return cmd_callback
 
-    def recv_error(self, error_code, error_text):
-        """When we receive an error from the server, notify the connection manager that we have a gearman error"""
-        return self.connection_manager.on_gearman_error(error_code, error_text)
+    def _pack_command(self, cmd_type, cmd_args):
+        """Converts a command to its raw binary format"""
+        if cmd_type not in protocol.GEARMAN_PARAMS_FOR_COMMAND:
+            raise errors.ProtocolError('Unknown command: %r' % get_command_name(cmd_type))
+
+        if constants._DEBUG_MODE_:
+            gearman_logger.debug('%s - Send - %s - %r', hex(id(self)), protocol.get_command_name(cmd_type), cmd_args)
+
+        if cmd_type == protocol.GEARMAN_COMMAND_TEXT_COMMAND:
+            return protocol.pack_text_command(cmd_type, cmd_args)
+        else:
+            # We'll be sending a response if we know we're a server side command
+            is_response = bool(self._is_server_side)
+            return protocol.pack_binary_command(cmd_type, cmd_args, is_response)
+
+    def _unpack_command(self, given_buffer):
+        """Conditionally unpack a binary command or a text based server command"""
+        if not given_buffer:
+            cmd_type = protocol.GEARMAN_COMMAND_NO_COMMAND
+            cmd_args = {}
+            cmd_len = 0
+        elif given_buffer[0] == protocol.NULL_CHAR:
+            # We'll be expecting a response if we know we're a client side command
+            is_response = bool(self._is_client_side)
+            cmd_type, cmd_args, cmd_len = protocol.parse_binary_command(given_buffer, is_response=is_response)
+        else:
+            cmd_type, cmd_args, cmd_len = protocol.parse_text_command(given_buffer)
+
+        if constants._DEBUG_MODE_ and cmd_type != protocol.GEARMAN_COMMAND_NO_COMMAND:
+            gearman_logger.debug('%s - Recv - %s - %r', hex(id(self)), protocol.get_command_name(cmd_type), cmd_args)
+
+        return cmd_type, cmd_args, cmd_len
+
+    def __repr__(self):
+        return ('<GearmanConnection %s:%d state=%s>' % (self._host, self._port, self._state))

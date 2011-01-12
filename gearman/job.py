@@ -26,7 +26,7 @@ class GearmanJobRequest(object):
         self.background = background
 
         self.connection_attempts = 0
-        self.max_connection_attempts = max_attempts
+        self.max_handler_attempts = max_attempts
 
         self.initialize_request()
 
@@ -49,8 +49,6 @@ class GearmanJobRequest(object):
 
     def reset(self):
         self.initialize_request()
-        self.connection = None
-        self.handle = None
 
     @property
     def status_updates(self):
@@ -77,6 +75,10 @@ class GearmanJobRequest(object):
 
         actually_complete = background_complete or foreground_complete
         return actually_complete
+
+    @property
+    def connection(self):
+        return self.gearman_job.connection
 
     def __repr__(self):
         formatted_representation = '<GearmanJobRequest task=%r, unique=%r, priority=%r, background=%r, state=%r, timed_out=%r>'
