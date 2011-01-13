@@ -3,7 +3,7 @@ import select as select_lib
 
 import gearman.util
 from gearman.connection import ASocket
-from gearman.connection_poller import GearmanConnectionPoller, POLLER_EVENTS
+from gearman.poller import GearmanConnectionPoller, POLLER_EVENTS
 from gearman.connection import ConnectionError
 from gearman.constants import _DEBUG_MODE_
 from gearman.errors import ServerUnavailable

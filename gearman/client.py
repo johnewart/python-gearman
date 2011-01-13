@@ -8,8 +8,6 @@ import gearman.util
 
 from gearman.connection_manager import GearmanConnectionManager
 from gearman import client_handler
-from gearman.client_handler import CLIENT_JOB_DISCONNECTED, CLIENT_JOB_EXCEPTION, CLIENT_JOB_DATA, CLIENT_JOB_WARNING, \
-    CLIENT_JOB_STATUS, CLIENT_JOB_CREATED, CLIENT_JOB_COMPLETE, CLIENT_JOB_FAIL, CLIENT_STATUS_RES, CLIENT_ERROR
 
 from gearman.constants import PRIORITY_NONE, PRIORITY_LOW, PRIORITY_HIGH, JOB_UNKNOWN, JOB_PENDING, JOB_COMPLETE, JOB_FAILED
 
@@ -50,17 +48,6 @@ class GearmanClient(GearmanConnectionManager):
             id(self._jobs_pending_status),
         ])
 
-    def _register_handler(self, current_handler):
-        super(GearmanClient, self)._register_handler(current_handler)
-        current_handler.add_command_listener(CLIENT_JOB_DISCONNECTED, self.on_job_disconnect)
-        current_handler.add_command_listener(CLIENT_JOB_EXCEPTION, self.on_job_exception)
-        current_handler.add_command_listener(CLIENT_JOB_DATA, self.on_job_data)
-        current_handler.add_command_listener(CLIENT_JOB_WARNING, self.on_job_warning)
-        current_handler.add_command_listener(CLIENT_JOB_STATUS, self.on_job_status)
-        current_handler.add_command_listener(CLIENT_JOB_COMPLETE, self.on_job_complete)
-        current_handler.add_command_listener(CLIENT_JOB_FAIL, self.on_job_fail)
-        current_handler.add_command_listener(CLIENT_STATUS_RES, self.on_status_update)
-        current_handler.add_command_listener(CLIENT_ERROR, self.on_gearman_error)
 
     def submit_job(self, task, data, unique=None, priority=PRIORITY_NONE, background=False, wait_until_complete=True, max_retries=0, poll_timeout=None):
         """Submit a single job to any gearman server"""
@@ -121,7 +108,7 @@ class GearmanClient(GearmanConnectionManager):
         # Promote our iterable of job_requests to a set for fast comparisons in the future
         known_request_set = set(job_requests)
 
-        # Add known requests to a "pending_request_set" automatically checked in self.on_job_*
+        # Add known requests to a "pending_request_set" automatically checked in self._on_job_*
         pending_request_set |= known_request_set
 
         # Poll until we know our request is no longer pending (it's been evicted from the pending_request_set)
@@ -249,34 +236,67 @@ class GearmanClient(GearmanConnectionManager):
         rotating_handlers.rotate(-failed_handlers)
         return chosen_handler
 
-    def on_job_disconnect(self, current_handler, current_request):
-        self.on_job_fail(current_request)
+    ###################################
+    ##### Event handler functions #####
+    ###################################
+    def _on_job_disconnect(self, current_handler, current_request):
+        self._on_job_fail(current_request)
 
-    def on_job_created(self, current_handler, current_request):
+    def _on_job_created(self, current_handler, current_request):
         self._requests_pending_created.discard(current_request)
 
-    def on_job_status(self, current_handler, current_request):
+    def _on_job_status(self, current_handler, current_request):
         pass
 
-    def on_job_data(self, current_handler, current_request):
+    def _on_job_data(self, current_handler, current_request):
         self._requests_pending_data.discard(current_request)
 
-    def on_job_warning(self, current_handler, current_request):
+    def _on_job_warning(self, current_handler, current_request):
         self._requests_pending_warning.discard(current_request)
 
-    def on_job_complete(self, current_handler, current_request):
+    def _on_job_complete(self, current_handler, current_request):
         self._requests_pending_complete.discard(current_request)
         self._unregister_request(current_request)
 
-    def on_job_fail(self, current_handler, current_request):
+    def _on_job_fail(self, current_handler, current_request):
         self._requests_pending_fail.discard(current_request)
         if self._retry_on_failure:
             self._send_job_request(current_request)
         else:
             self._unregister_request(current_request)
 
-    def on_job_exception(self, current_handler, current_request):
+    def _on_job_exception(self, current_handler, current_request):
         self._requests_pending_exception.discard(current_request)
 
-    def on_status_update(self, current_handler, job_info):
+    def _on_status_update(self, current_handler, job_info):
         pass
+
+    ###################################
+    # Command handler mgmt functions ##
+    ###################################
+    def _setup_command_handler(self, current_handler):
+        super(GearmanClient, self)._setup_command_handler(current_handler)
+        self.register_for_event(self._on_job_disconnect, client_handler.EVENT_JOB_DISCONNECTED, current_handler)
+        self.register_for_event(self._on_job_exception, client_handler.EVENT_JOB_EXCEPTION, current_handler)
+        self.register_for_event(self._on_job_data, client_handler.EVENT_JOB_DATA, current_handler)
+        self.register_for_event(self._on_job_warning, client_handler.EVENT_JOB_WARNING, current_handler)
+        self.register_for_event(self._on_job_status, client_handler.EVENT_JOB_STATUS, current_handler)
+        self.register_for_event(self._on_job_complete, client_handler.EVENT_JOB_COMPLETE, current_handler)
+        self.register_for_event(self._on_job_fail, client_handler.EVENT_JOB_FAIL, current_handler)
+        self.register_for_event(self._on_status_update, client_handler.EVENT_STATUS_RES, current_handler)
+        self.register_for_event(self._on_gearman_error, client_handler.EVENT_GEARMAN_ERROR, current_handler)
+        return current_handler
+
+    def _teardown_command_handler(self, current_handler):
+        self.unregister_for_event(self._on_gearman_error, client_handler.EVENT_GEARMAN_ERROR, current_handler)
+        self.unregister_for_event(self._on_status_update, client_handler.EVENT_STATUS_RES, current_handler)
+        self.unregister_for_event(self._on_job_fail, client_handler.EVENT_JOB_FAIL, current_handler)
+        self.unregister_for_event(self._on_job_complete, client_handler.EVENT_JOB_COMPLETE, current_handler)
+        self.unregister_for_event(self._on_job_status, client_handler.EVENT_JOB_STATUS, current_handler)
+        self.unregister_for_event(self._on_job_warning, client_handler.EVENT_JOB_WARNING, current_handler)
+        self.unregister_for_event(self._on_job_data, client_handler.EVENT_JOB_DATA, current_handler)
+        self.unregister_for_event(self._on_job_exception, client_handler.EVENT_JOB_EXCEPTION, current_handler)
+        self.unregister_for_event(self._on_job_disconnect, client_handler.EVENT_JOB_DISCONNECTED, current_handler)
+        super(GearmanClient, self)._teardown_command_handler(current_handler)
+        return current_handler
+
