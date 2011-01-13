@@ -1,15 +1,11 @@
 import logging
-import select as select_lib
-
-import gearman.util
-from gearman.connection import ASocket
-from gearman.poller import GearmanConnectionPoller, POLLER_EVENTS
-from gearman.connection import ConnectionError
-from gearman.constants import _DEBUG_MODE_
-from gearman.errors import ServerUnavailable
-from gearman.job import GearmanJob, GearmanJobRequest
-from gearman import protocol
+from gearman import command_handler
 from gearman import compat
+from gearman import connection
+from gearman import constants
+from gearman import util
+from gearman import poller
+from gearman import protocol
 
 gearman_logger = logging.getLogger(__name__)
 
@@ -39,7 +35,7 @@ class NoopEncoder(DataEncoder):
         cls._enforce_byte_string(decodable_string)
         return decodable_string
 
-class GearmanConnectionManager(object):
+class ConnectionManager(object):
     """Abstract base class for any Gearman-type client that needs to connect/listen to multiple connections
 
     Mananges and polls a group of gearman connections
@@ -49,8 +45,8 @@ class GearmanConnectionManager(object):
     Automatically encodes all 'data' fields as specified in protocol.py
     """
     command_handler_class = None
-    connection_class = connection.GearmanConnection
-    poller_class = connection_poller.GearmanConnectionPoller
+    connection_class = connection.Connection
+    poller_class = poller.Poller
 
     data_encoder = NoopEncoder
 
@@ -71,7 +67,7 @@ class GearmanConnectionManager(object):
             self.connect_to_host(host_list)
 
     def connect_to_host(self, hostport_tuple):
-        gearman_host, gearman_port = gearman.util.disambiguate_server_parameter(hostport_tuple)
+        gearman_host, gearman_port = util.disambiguate_server_parameter(hostport_tuple)
         gearman_port = gearman_port or constants.DEFAULT_GEARMAN_PORT
 
         current_connection = self._build_connection(host=gearman_host, port=gearman_port)
@@ -158,15 +154,15 @@ class GearmanConnectionManager(object):
         return self.poller_class(event_broker=self._event_broker)
 
     def _setup_poller(self, current_poller):
-        self.register_for_event(self._on_poller_read, EVENT_READ, current_poller)
-        self.register_for_event(self._on_poller_write, EVENT_WRITE, current_poller)
-        self.register_for_event(self._on_poller_error, EVENT_ERROR, current_poller)
+        self.register_for_event(self._on_poller_read, poller.EVENT_READ, current_poller)
+        self.register_for_event(self._on_poller_write, poller.EVENT_WRITE, current_poller)
+        self.register_for_event(self._on_poller_error, poller.EVENT_ERROR, current_poller)
         return current_poller
 
     def _teardown_poller(self, current_poller):
-        self.unregister_for_event(self._on_poller_error, EVENT_ERROR, current_poller)
-        self.unregister_for_event(self._on_poller_write, EVENT_WRITE, current_poller)
-        self.unregister_for_event(self._on_poller_read, EVENT_READ, current_poller)
+        self.unregister_for_event(self._on_poller_error, poller.EVENT_ERROR, current_poller)
+        self.unregister_for_event(self._on_poller_write, poller.EVENT_WRITE, current_poller)
+        self.unregister_for_event(self._on_poller_read, poller.EVENT_READ, current_poller)
         return current_poller
 
     def _poll_until_stopped(self, continue_polling_callback, timeout=None):

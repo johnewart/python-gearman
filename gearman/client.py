@@ -4,10 +4,10 @@ import logging
 import os
 import random
 
-import gearman.util
-
-from gearman.connection_manager import GearmanConnectionManager
+from gearman import util
+from gearman import connection_manager
 from gearman import client_handler
+from gearman import job
 
 from gearman.constants import PRIORITY_NONE, PRIORITY_LOW, PRIORITY_HIGH, JOB_UNKNOWN, JOB_PENDING, JOB_COMPLETE, JOB_FAILED
 
@@ -16,11 +16,15 @@ gearman_logger = logging.getLogger(__name__)
 # This number must be <= GEARMAN_UNIQUE_SIZE in gearman/libgearman/constants.h 
 RANDOM_UNIQUE_BYTES = 16
 
-class GearmanClient(GearmanConnectionManager):
+class GearmanClient(connection_manager.ConnectionManager):
     """
     GearmanClient :: Interface to submit jobs to a Gearman server
     """
-    connection_class = client_handler.ClientConnection
+    job_class = job.GearmanJob
+    job_request_class = job.GearmanJobRequest
+    command_handler_class = client_handler.GearmanClientCommandHandler
+
+    _retry_on_failure = False
 
     def __init__(self, host_list=None, random_unique_bytes=RANDOM_UNIQUE_BYTES):
         super(GearmanClient, self).__init__(host_list=host_list)
@@ -55,7 +59,7 @@ class GearmanClient(GearmanConnectionManager):
 
         completed_job_list = self.submit_multiple_jobs([job_info], background=background, wait_until_complete=wait_until_complete, max_retries=max_retries, poll_timeout=poll_timeout)
 
-        return gearman.util.unlist(completed_job_list)
+        return util.unlist(completed_job_list)
 
     def submit_multiple_jobs(self, jobs_to_submit, background=False, wait_until_complete=True, max_retries=0, poll_timeout=None):
         """Takes a list of jobs_to_submit with dicts of
@@ -185,8 +189,8 @@ class GearmanClient(GearmanConnectionManager):
             return
 
         # Always start off this task on the same server if possible
-        shuffled_handlers = random.shuffle(list(self._handler_pool))
-        self._request_to_handler_queue[current_request] = collections.deque(shuffled_handlers)
+        shuffled_connections = random.shuffle(list(self._connection_pool))
+        self._request_to_handler_queue[current_request] = collections.deque(shuffled_connections)
 
     def _unregister_request(self, current_request):
         self._request_to_handler_queue.pop(current_request, None)
@@ -210,31 +214,29 @@ class GearmanClient(GearmanConnectionManager):
 
     def _send_job_request(self, current_request):
         """Attempt to send out a job request"""
-        chosen_handler = self._choose_handler(current_request)
+        chosen_handler = self._choose_connection(current_request)
         chosen_handler.send_job_request(current_request)
 
         current_request.timed_out = False
         return current_request
 
-    def _choose_handler(self, current_request):
+    def _choose_connection(self, current_request):
         """Return a live connection for the given hash"""
-        self._check_handlers()
-
         # We'll keep track of the connections we're attempting to use so if we ever have to retry, we can use this history
-        rotating_handlers = self._request_to_handler_queue[current_request]
+        rotating_connections = self._request_to_handler_queue[current_request]
 
-        failed_handlers = 0
-        chosen_handler = None
-        for possible_handler in rotating_handlers:
-            if possible_handler.connected:
-                chosen_handler = possible_handler
+        failed_connections = 0
+        chosen_connection = None
+        for possible_connection in rotating_connections:
+            if possible_connection.connected:
+                chosen_connection = possible_connection
                 break
 
-            failed_handlers += 1
+            failed_connections += 1
 
         # Rotate our server list so we'll skip all our broken servers
-        rotating_handlers.rotate(-failed_handlers)
-        return chosen_handler
+        rotating_connections.rotate(-failed_connections)
+        return chosen_connection
 
     ###################################
     ##### Event handler functions #####
@@ -269,6 +271,9 @@ class GearmanClient(GearmanConnectionManager):
         self._requests_pending_exception.discard(current_request)
 
     def _on_status_update(self, current_handler, job_info):
+        pass
+
+    def _on_gearman_error(self, current_handler, *args, **kwargs):
         pass
 
     ###################################

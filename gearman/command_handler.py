@@ -136,6 +136,3 @@ class GearmanCommandHandler(object):
             gearman_logger.debug('%s - Recv - %s - %r', hex(id(self)), protocol.get_command_name(cmd_type), cmd_args)
 
         return cmd_type, cmd_args, cmd_len
-
-    def __repr__(self):
-        return ('<GearmanConnection %s:%d state=%s>' % (self._host, self._port, self._state))

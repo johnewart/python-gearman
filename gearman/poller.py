@@ -2,11 +2,9 @@ import errno
 import logging
 import select
 
-import gearman.util
 from gearman.constants import _DEBUG_MODE_
-from gearman.connection import ConnectionError
-from gearman.job import GearmanJob, GearmanJobRequest
 from gearman import compat
+from gearman import util
 
 gearman_logger = logging.getLogger(__name__)
 
@@ -47,9 +45,9 @@ class ConnectionPoller(object):
         self._write_fd_set.discard(current_fd)
         self._entire_fd_set.discard(current_fd)
 
-    def _notify(self, poller_event):
+    def _notify(self, poller_event, fd):
         if self._event_broker:
-            self._event_broker.notify(self, poller_event, *args, **kwargs)
+            self._event_broker.notify(self, poller_event, fd)
 
     def notify_read(self, fd):
         self._notify(EVENT_READ, fd)
@@ -61,7 +59,7 @@ class ConnectionPoller(object):
         self._notify(EVENT_ERROR, fd)
 
     def poll_until_stopped(self, continue_polling_callback, timeout=None):
-        countdown_timer = gearman.util.CountdownTimer(timeout)
+        countdown_timer = util.CountdownTimer(timeout)
 
         callback_ok = continue_polling_callback()
         timer_ok = bool(not countdown_timer.expired)
@@ -126,7 +124,7 @@ class SelectPoller(ConnectionPoller):
                         check_rd_fds.discard(fd_to_test)
                         check_wr_fds.discard(fd_to_test)
                         check_ex_fds.discard(fd_to_test)
-                        gearman_logger.error('select error: %r' % current_sock_to_test)
+                        gearman_logger.error('select error: %r' % fd_to_test)
 
         if _DEBUG_MODE_:
             gearman_logger.debug('select :: Poll - %d :: Read - %d :: Write - %d :: Error - %d', \
@@ -154,4 +152,4 @@ class SelectPoller(ConnectionPoller):
 
         return rd_list, wr_list, er_list
 
-GearmanConnectionPoller = SelectPoller
+Poller = SelectPoller

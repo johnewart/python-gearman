@@ -70,13 +70,6 @@ class GearmanClientCommandHandler(command_handler.GearmanCommandHandler):
         self._register_request(current_request)
         self.send_command(protocol.GEARMAN_COMMAND_GET_STATUS, job_handle=current_request.job.handle)
 
-    def _register_request(self, current_request):
-        self.handle_to_request_map[current_request.job.handle] = current_request
-
-    def _unregister_request(self, current_request):
-        # De-allocate this request for all jobs
-        return self.handle_to_request_map.pop(current_request.job.handle, None)
-
     ##################################################################
     ## Gearman command callbacks with kwargs defined by protocol.py ##
     ##################################################################
@@ -90,6 +83,7 @@ class GearmanClientCommandHandler(command_handler.GearmanCommandHandler):
         self._handle_to_request_map[current_request.job.handle] = current_request
 
     def _unregister_request(self, current_request):
+        # De-allocate this request for all jobs
         return self._handle_to_request_map.pop(current_request.job.handle, None)
 
     #### Interaction with commands ####
