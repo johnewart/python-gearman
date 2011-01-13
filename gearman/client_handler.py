@@ -2,7 +2,7 @@ import collections
 import time
 import logging
 
-from gearman import connection
+from gearman import command_handler
 from gearman import constants
 from gearman import errors
 from gearman import protocol
@@ -11,24 +11,21 @@ from gearman.protocol import GEARMAN_COMMAND_JOB_CREATED, GEARMAN_COMMAND_WORK_S
 
 gearman_logger = logging.getLogger(__name__)
 
-CLIENT_JOB_DISCONNECTED = 'job_disconnected'
-CLIENT_JOB_EXCEPTION = protocol.get_command_name(GEARMAN_COMMAND_WORK_EXCEPTION)
-CLIENT_JOB_DATA = protocol.get_command_name(GEARMAN_COMMAND_WORK_DATA)
-CLIENT_JOB_WARNING = protocol.get_command_name(GEARMAN_COMMAND_WORK_WARNING)
-CLIENT_JOB_STATUS = protocol.get_command_name(GEARMAN_COMMAND_WORK_STATUS)
-CLIENT_JOB_CREATED = protocol.get_command_name(GEARMAN_COMMAND_JOB_CREATED)
-CLIENT_JOB_COMPLETE = protocol.get_command_name(GEARMAN_COMMAND_WORK_COMPLETE)
-CLIENT_JOB_FAIL = protocol.get_command_name(GEARMAN_COMMAND_WORK_FAIL)
-CLIENT_STATUS_RES = protocol.get_command_name(GEARMAN_COMMAND_STATUS_RES)
-CLIENT_ERROR = protocol.get_command_name(GEARMAN_COMMAND_ERROR)
+EVENT_JOB_DISCONNECTED = 'job_disconnected'
+EVENT_JOB_EXCEPTION = protocol.get_command_name(GEARMAN_COMMAND_WORK_EXCEPTION)
+EVENT_JOB_DATA = protocol.get_command_name(GEARMAN_COMMAND_WORK_DATA)
+EVENT_JOB_WARNING = protocol.get_command_name(GEARMAN_COMMAND_WORK_WARNING)
+EVENT_JOB_STATUS = protocol.get_command_name(GEARMAN_COMMAND_WORK_STATUS)
+EVENT_JOB_CREATED = protocol.get_command_name(GEARMAN_COMMAND_JOB_CREATED)
+EVENT_JOB_COMPLETE = protocol.get_command_name(GEARMAN_COMMAND_WORK_COMPLETE)
+EVENT_JOB_FAIL = protocol.get_command_name(GEARMAN_COMMAND_WORK_FAIL)
+EVENT_STATUS_RES = protocol.get_command_name(GEARMAN_COMMAND_STATUS_RES)
+EVENT_GEARMAN_ERROR = protocol.get_command_name(GEARMAN_COMMAND_ERROR)
 
-class ClientConnection(connection.GearmanConnection):
+class GearmanClientCommandHandler(command_handler.GearmanCommandHandler):
     """Maintains the state of this connection on behalf of a GearmanClient"""
-    AVAILABLE_EVENTS = set([CLIENT_JOB_DISCONNECTED, CLIENT_JOB_EXCEPTION, CLIENT_JOB_DATA, CLIENT_JOB_WARNING, \
-        CLIENT_JOB_STATUS, CLIENT_JOB_CREATED, CLIENT_JOB_COMPLETE, CLIENT_JOB_FAIL, CLIENT_STATUS_RES, CLIENT_ERROR])
-
     def _reset_handler(self):
-        super(ClientConnection, self)._reset_handler()
+        super(GearmanClientCommandHandler, self)._reset_handler()
         # When we first submit jobs, we don't have a handle assigned yet... these handles will be returned in the order of submission
         self._requests_awaiting_handles = collections.deque()
         self._handle_to_request_map = dict()
@@ -36,11 +33,11 @@ class ClientConnection(connection.GearmanConnection):
     def on_socket_disconnect(self):
         for pending_request in self._requests_awaiting_handles:
             pending_request.state = constants.JOB_UNKNOWN
-            self._notify(CLIENT_JOB_DISCONNECTED, pending_request)
+            self._notify(EVENT_JOB_DISCONNECTED, pending_request)
 
         for inflight_request in self._handle_to_request_map.itervalues():
             inflight_request.state = constants.JOB_UNKNOWN
-            self._notify(CLIENT_JOB_DISCONNECTED, inflight_request)
+            self._notify(EVENT_JOB_DISCONNECTED, inflight_request)
 
     ##################################################################
     ##### Public interface methods to be called by GearmanClient #####
@@ -99,7 +96,7 @@ class ClientConnection(connection.GearmanConnection):
     def recv_error(self, error_code, error_text):
         """When we receive an error from the server, notify the connection manager that we have a gearman error"""
         gearman_logger.error('Received error from server: %s: %s' % (error_code, error_text))
-        self._notify(CLIENT_ERROR, error_code, error_text)
+        self._notify(EVENT_GEARMAN_ERROR, error_code, error_text)
 
     def recv_job_created(self, job_handle):
         if not self._requests_awaiting_handles:
@@ -114,8 +111,7 @@ class ClientConnection(connection.GearmanConnection):
         current_request.state = constants.JOB_CREATED
         self._register_request(current_request)
 
-        self._notify(CLIENT_JOB_CREATED, current_request)
-        return True
+        self._notify(EVENT_JOB_CREATED, current_request)
 
     def recv_work_data(self, job_handle, data):
         # Queue a WORK_DATA update
@@ -124,8 +120,7 @@ class ClientConnection(connection.GearmanConnection):
 
         current_request.data_updates.append(self.decode_data(data))
 
-        self._notify(CLIENT_JOB_DATA, current_request)
-        return True
+        self._notify(EVENT_JOB_DATA, current_request)
 
     def recv_work_warning(self, job_handle, data):
         # Queue a WORK_WARNING update
@@ -134,8 +129,7 @@ class ClientConnection(connection.GearmanConnection):
 
         current_request.warning_updates.append(self.decode_data(data))
 
-        self._notify(CLIENT_JOB_WARNING, current_request)
-        return True
+        self._notify(EVENT_JOB_WARNING, current_request)
 
     def recv_work_status(self, job_handle, numerator, denominator):
         # Queue a WORK_STATUS update
@@ -153,8 +147,7 @@ class ClientConnection(connection.GearmanConnection):
             'time_received': time.time()
         }
 
-        self._notify(CLIENT_JOB_STATUS, current_request.status)
-        return True
+        self._notify(EVENT_JOB_STATUS, current_request.status)
 
     def recv_work_complete(self, job_handle, data):
         # Update the state of our request and store our returned result
@@ -164,9 +157,8 @@ class ClientConnection(connection.GearmanConnection):
         current_request.result = self.decode_data(data)
         current_request.state = constants.JOB_COMPLETE
 
-        self._notify(CLIENT_JOB_COMPLETE, current_request)
+        self._notify(EVENT_JOB_COMPLETE, current_request)
         self._unregister_request(current_request)
-        return True
 
     def recv_work_fail(self, job_handle):
         # Update the state of our request and mark this job as failed
@@ -175,9 +167,8 @@ class ClientConnection(connection.GearmanConnection):
 
         current_request.state = constants.JOB_FAILED
 
-        self._notify(CLIENT_JOB_FAIL, current_request)
+        self._notify(EVENT_JOB_FAIL, current_request)
         self._unregister_request(current_request)
-        return True
 
     def recv_work_exception(self, job_handle, data):
         # Using GEARMAND_COMMAND_WORK_EXCEPTION is not recommended at time of this writing [2010-02-24]
@@ -188,8 +179,7 @@ class ClientConnection(connection.GearmanConnection):
 
         current_request.exception = self.decode_data(data)
 
-        self._notify(CLIENT_JOB_EXCEPTION, current_request)
-        return True
+        self._notify(EVENT_JOB_EXCEPTION, current_request)
 
     def recv_status_res(self, job_handle, known, running, numerator, denominator):
         # Make our status response Python friendly
@@ -203,7 +193,7 @@ class ClientConnection(connection.GearmanConnection):
             'time_received': time.time()
         }
 
-        self._notify(CLIENT_STATUS_RES, status_dict)
+        self._notify(EVENT_STATUS_RES, status_dict)
 
         # If we received a STATUS_RES update about this request, update our known status
         current_request = self._handle_to_request_map.get(job_handle)
@@ -211,5 +201,3 @@ class ClientConnection(connection.GearmanConnection):
             current_request.status = status_dict
             if not job_known:
                 self._unregister_request(current_request)
-
-        return True

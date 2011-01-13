@@ -8,28 +8,25 @@ import functools
 import select as select_lib
 import time
 
+from gearman import compat
 from gearman.constants import DEFAULT_GEARMAN_PORT
 
-def call_on_event(callback_method, event_source, event_name):
-    event_source.listen(event_name, callback_method)
-
 class EventBroker(object):
-    def __init__(self, known_source, known_events):
-        self._event_source = known_source
-        self._event_listeners = dict((event_name, set()) for event_name in known_events)
+    def __init__(self):
+        self._event_listeners = compat.defaultdict(lambda: compat.defaultdict(set))
 
-    def listen(self, event_name, callback_fxn):
-        self._event_listeners[event_name].add(callback_fxn)
+    def listen(self, event_source, event_name, callback_fxn):
+        self._event_listeners[event_source][event_name].add(callback_fxn)
 
-    def unlisten(self, event_name, callback_fxn):
-        self._event_listeners[event_name].discard(callback_fxn)
+    def unlisten(self, event_source, event_name, callback_fxn):
+        self._event_listeners[event_source][event_name].discard(callback_fxn)
 
-    def notify(self, event_name, *args, **kwargs):
+    def notify(self, event_source, event_name, *args, **kwargs):
         # At time of notification, we should take a snapshot of all current listeners
         # In case a listener mutates this set on the fly
-        known_callbacks = tuple(self._event_listeners[event_name])
+        known_callbacks = tuple(self._event_listeners[event_source][event_name])
         for current_callback in known_callbacks:
-            current_callback(self._event_source, *args, **kwargs)
+            current_callback(event_source, *args, **kwargs)
 
 class CountdownTimer(object):
     """Timer class that keeps track of time remaining"""

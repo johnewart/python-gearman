@@ -26,12 +26,12 @@ class ConnectionPoller(object):
     # Connection management functions #
     ###################################
 
-    def __init__(self):
+    def __init__(self, event_broker=None):
         self._read_fd_set = set()
         self._write_fd_set = set()
         self._entire_fd_set = set()
 
-        self._event_broker = util.EventBroker(self, POLLER_EVENTS)
+        self._event_broker = event_broker
 
     def register_for_read(self, current_fd):
         """Add a new current_sockection to this current_sockection manager"""
@@ -47,14 +47,18 @@ class ConnectionPoller(object):
         self._write_fd_set.discard(current_fd)
         self._entire_fd_set.discard(current_fd)
 
+    def _notify(self, poller_event):
+        if self._event_broker:
+            self._event_broker.notify(self, poller_event, *args, **kwargs)
+
     def notify_read(self, fd):
-        self._event_broker.notify(EVENT_READ, fd)
+        self._notify(EVENT_READ, fd)
 
     def notify_write(self, fd):
-        self._event_broker.notify(EVENT_WRITE, fd)
+        self._notify(EVENT_WRITE, fd)
 
     def notify_error(self, fd):
-        self._event_broker.notify(EVENT_ERROR, fd)
+        self._notify(EVENT_ERROR, fd)
 
     def poll_until_stopped(self, continue_polling_callback, timeout=None):
         countdown_timer = gearman.util.CountdownTimer(timeout)

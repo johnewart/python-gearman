@@ -10,16 +10,19 @@ class ConnectionError(Exception):
 
 ERRNO_DISCONNECTED = -1
 
+STATE_INIT = 'init'
 STATE_CONNECTING = 'connecting'
 STATE_CONNECTED = 'connected'
 STATE_DISCONNECTED = 'disconnected'
 
-EVENT_CONNECTED = 'connection_connected'
-EVENT_DISCONNECTED = 'connection_disconnected'
-EVENT_PENDING_READ = 'connection_pending_read' # Buffer / socket has data to read, no args
-EVENT_PENDING_SEND = 'connection_pending_send' # Buffer / socket has data to send, no args
-EVENT_DATA_READ = 'connection_data_read'    # Data read off socket AND buffer, data_stream=byte_array processed
-EVENT_DATA_SENT = 'connection_data_sent'    # Data written to the socket, data_stream=byte_array sent
+_DISCONNECTED_STATES = set(STATE_INIT, STATE_DISCONNECTED)
+
+EVENT_CONNECTED = 'connected'
+EVENT_DISCONNECTED = 'disconnected'
+EVENT_PENDING_READ = 'pending_read' # Buffer / socket has data to read, no args
+EVENT_PENDING_SEND = 'pending_send' # Buffer / socket has data to send, no args
+EVENT_DATA_READ = 'data_read'    # Data read off socket AND buffer, data_stream=byte_array processed
+EVENT_DATA_SENT = 'data_sent'    # Data written to the socket, data_stream=byte_array sent
 CONNECTION_EVENTS = set([EVENT_CONNECTED, EVENT_DISCONNECTED, EVENT_PENDING_READ, EVENT_PENDING_SEND, EVENT_DATA_READ, EVENT_DATA_SENT])
 
 class Connection(object):
@@ -30,19 +33,19 @@ class Connection(object):
     """
     bytes_to_read = 4096
 
-    def __init__(self, host=None, port=None):
+    def __init__(self, host=None, port=None, event_broker=None):
         self._host = host
         self._port = port
+        self._event_broker = event_broker
+
         if host is None:
             raise self._throw_exception(message='no host')
 
         if port is None:
             raise self._throw_exception(message='no port')
 
-        self._reset_handler()
-        self._reconnectable = True
-
-        self._event_broker = util.EventBroker(self, CONNECTION_EVENTS)
+        self._state = STATE_INIT
+        self.reset()
 
     ########################################################
     ##### Public methods to masquerade like a socket #######
@@ -55,15 +58,11 @@ class Connection(object):
 
     def close(self):
         """Shutdown our existing socket and reset all of our connection data"""
-        if not self._socket:
-            self._throw_exception(message='no socket')
-
         try:
            self._socket.close()
         except socket.error:
             pass
 
-        self._reconnectable = False
         self._update_state(ERRNO_DISCONNECTED)
 
     def connect(self):
@@ -72,11 +71,7 @@ class Connection(object):
         if not self.disconnected:
             self._throw_exception(message='invalid connection state')
 
-        if not self._reconnectable:
-            self._throw_exception(message='connection closed')
-
         # Attempt to do an asynchronous connect
-        self._socket = self._create_socket()
         try:
             socket_address = self.getpeername()
             connect_errno = self._socket.connect_ex(socket_address)
@@ -87,9 +82,6 @@ class Connection(object):
 
     def fileno(self):
         """Implements fileno() for use with select.select()"""
-        if not self._socket:
-            self._throw_exception(message='no socket')
-
         return self._socket.fileno()
 
     def getpeername(self):
@@ -127,14 +119,9 @@ class Connection(object):
     ########################################################
     ##### Public methods - checking connection state #######
     ########################################################
-    def listen(self, event_name, event_callback):
-        self._event_broker.listen(event_name, event_callback)
-
-    def unlisten(self, event_name, event_callback):
-        self._event_broker.unlisten(event_name, event_callback)
-
     def _notify(self, connection_event, *args, **kwargs):
-        self._event_broker.notify(connection_event, *args, **kwargs)
+        if self._event_broker:
+            self._event_broker.notify(self, connection_event, *args, **kwargs)
 
     @property
     def connected(self):
@@ -146,7 +133,7 @@ class Connection(object):
 
     @property
     def disconnected(self):
-        return bool(self._state == STATE_DISCONNECTED)
+        return bool(self._state in _DISCONNECTED_STATES)
 
     @property
     def readable(self):
@@ -202,13 +189,15 @@ class Connection(object):
         elif error_number == errno.EINPROGRESS:
             self._state = STATE_CONNECTING
         else:
+            old_state = self._state
             self._state = STATE_DISCONNECTED
-            self._notify(EVENT_DISCONNECTED)
-            self._reset_handler()
+            if old_state != STATE_INIT:
+                self._notify(EVENT_DISCONNECTED)
 
-    def _reset_handler(self):
+    def reset(self):
         # Reset all our raw data buffers
-        self._state = STATE_DISCONNECTED
+        self._socket = self._create_socket()
+
         self._incoming_buffer = ''
         self._outgoing_buffer = ''
 

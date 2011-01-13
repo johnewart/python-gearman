@@ -24,39 +24,33 @@ class GearmanCommandHandler(object):
 
     AVAILABLE_EVENTS = None
 
-    def __init__(self,data_encoder=None):
+    def __init__(self, data_encoder=None, event_broker=None):
         self._data_encoder = None
 
         self._command_callback_map = {}
-        self._event_broker = util.EventBroker(self, self.AVAILABLE_EVENTS)
+        self._event_broker = event_broker
 
-    def setup(self):
+    def handle_connect(self):
         pass
 
-    def teardown(self):
+    def handle_disconnect(self):
         pass
 
     #### Interaction with the raw socket ####
-    def listen(self, cmd_name, cmd_callback):
-        self._event_broker.listen(cmd_name, cmd_callback)
-
-    def unlisten(self, cmd_name, cmd_callback):
-        self._event_broker.unlisten(cmd_name, cmd_callback)
-
     def _notify(self, command_event, *args, **kwargs):
-        self._event_broker.notify(command_event, *args, **kwargs)
+        if self._event_broker:
+            self._event_broker.notify(self, command_event, *args, **kwargs)
 
     def recv_data(self, data_stream):
         current_data_stream = data_stream
         bytes_read = 0
 
-        continue_to_process_commands = True
-        while continue_to_process_commands:
+        while True:
             cmd_type, cmd_args, cmd_len = self._unpack_command(current_data_stream)
             if cmd_type == protocol.GEARMAN_COMMAND_NO_COMMAND:
                 break
 
-            continue_to_process_commands = self.recv_command(cmd_type, cmd_args)
+            self.recv_command(cmd_type, cmd_args)
 
             current_data_stream = current_data_stream[cmd_len:]
             bytes_read += cmd_len
