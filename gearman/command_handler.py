@@ -25,15 +25,19 @@ class GearmanCommandHandler(object):
     AVAILABLE_EVENTS = None
 
     def __init__(self, data_encoder=None, event_broker=None):
-        self._data_encoder = None
-
         self._command_callback_map = {}
+
+        self._data_encoder = data_encoder
         self._event_broker = event_broker
+        self.reset()
 
     def handle_connect(self):
         pass
 
     def handle_disconnect(self):
+        pass
+
+    def reset(self):
         pass
 
     #### Interaction with the raw socket ####
@@ -64,7 +68,7 @@ class GearmanCommandHandler(object):
 
         # Expand the arguments as passed by the protocol
         # This must match the parameter names as defined in the command handler
-        return cmd_callback(**cmd_args)
+        cmd_callback(**cmd_args)
 
     def send_command(self, cmd_type, **cmd_args):
         data_stream = self._pack_command(cmd_type, cmd_args)

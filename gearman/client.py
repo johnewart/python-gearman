@@ -83,6 +83,8 @@ class GearmanClient(connection_manager.ConnectionManager):
         """
         assert type(job_requests) in (list, tuple, set), "Expected multiple job requests, received 1?"
 
+        self.wait_until_connection_available(poll_timeout=poll_timeout)
+
         for current_request in job_requests:
             self._register_request(current_request)
             self._send_job_request(current_request)
@@ -183,13 +185,21 @@ class GearmanClient(connection_manager.ConnectionManager):
     #     if not compat.any(current_handler.connected for current_handler in self._handler_pool):
     #         raise errors.ServerUnavailable(self._handler_pool)
 
+    def wait_until_connection_available(self, poll_timeout=None):
+        # Poll until we know our request is no longer pending (it's been evicted from the pending_request_set)
+        def continue_while_any_pending():
+            return not any(current_connection.connected for current_connection in self._connection_pool)
+
+        self._poll_until_stopped(continue_while_any_pending, timeout=poll_timeout)
+
     def _register_request(self, current_request):
         """When registering a request, keep track of which connections we've already tried submitting to"""
         if current_request in self._request_to_handler_queue:
             return
 
         # Always start off this task on the same server if possible
-        shuffled_connections = random.shuffle(list(self._connection_pool))
+        shuffled_connections = list(self._connection_pool)
+        random.shuffle(shuffled_connections)
         self._request_to_handler_queue[current_request] = collections.deque(shuffled_connections)
 
     def _unregister_request(self, current_request):
@@ -214,10 +224,15 @@ class GearmanClient(connection_manager.ConnectionManager):
 
     def _send_job_request(self, current_request):
         """Attempt to send out a job request"""
-        chosen_handler = self._choose_connection(current_request)
+        chosen_connection = self._choose_connection(current_request)
+
+        current_request.job.connection = chosen_connection
+
+        chosen_handler = self._connection_to_handler_map[chosen_connection]
         chosen_handler.send_job_request(current_request)
 
         current_request.timed_out = False
+
         return current_request
 
     def _choose_connection(self, current_request):
@@ -236,6 +251,8 @@ class GearmanClient(connection_manager.ConnectionManager):
 
         # Rotate our server list so we'll skip all our broken servers
         rotating_connections.rotate(-failed_connections)
+        if not chosen_connection:
+            raise Exception(self._connection_pool)
         return chosen_connection
 
     ###################################

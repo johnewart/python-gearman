@@ -15,7 +15,7 @@ STATE_CONNECTING = 'connecting'
 STATE_CONNECTED = 'connected'
 STATE_DISCONNECTED = 'disconnected'
 
-_DISCONNECTED_STATES = set(STATE_INIT, STATE_DISCONNECTED)
+DISCONNECTED_STATES = set([STATE_INIT, STATE_DISCONNECTED])
 
 EVENT_CONNECTED = 'connected'
 EVENT_DISCONNECTED = 'disconnected'
@@ -133,7 +133,7 @@ class Connection(object):
 
     @property
     def disconnected(self):
-        return bool(self._state in _DISCONNECTED_STATES)
+        return bool(self._state in DISCONNECTED_STATES)
 
     @property
     def readable(self):

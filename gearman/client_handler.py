@@ -24,11 +24,14 @@ EVENT_GEARMAN_ERROR = protocol.get_command_name(GEARMAN_COMMAND_ERROR)
 
 class GearmanClientCommandHandler(command_handler.GearmanCommandHandler):
     """Maintains the state of this connection on behalf of a GearmanClient"""
-    def _reset_handler(self):
-        super(GearmanClientCommandHandler, self)._reset_handler()
+    def reset(self):
+        super(GearmanClientCommandHandler, self).reset()
         # When we first submit jobs, we don't have a handle assigned yet... these handles will be returned in the order of submission
         self._requests_awaiting_handles = collections.deque()
         self._handle_to_request_map = dict()
+
+    def handle_connect(self):
+        self.reset()
 
     def handle_disconnect(self):
         for pending_request in self._requests_awaiting_handles:
@@ -44,14 +47,12 @@ class GearmanClientCommandHandler(command_handler.GearmanCommandHandler):
     ##################################################################
     def send_job_request(self, current_request):
         """Register a newly created job request"""
-        assert not current_request.job.connection and not current_request.job.connection.connected, "We shouldn't already be connected to a server"
         self._assert_request_state(current_request, constants.JOB_UNKNOWN)
 
         if current_request.connection_attempts >= current_request.max_handler_attempts:
             raise errors.ExceededConnectionAttempts('Exceeded %d connection attempt(s) :: %r' % (current_request.max_handler_attempts, current_request))
 
         # Once this command is sent, our request needs to wait for a handle
-        current_request.job.connection = self
         current_request.connection_attempts += 1
 
         # Handle the I/O for requesting a job - determine which COMMAND we need to send

@@ -64,7 +64,7 @@ class ConnectionManager(object):
 
         host_list = host_list or []
         for hostport_tuple in host_list:
-            self.connect_to_host(host_list)
+            self.connect_to_host(hostport_tuple)
 
     def connect_to_host(self, hostport_tuple):
         gearman_host, gearman_port = util.disambiguate_server_parameter(hostport_tuple)
@@ -105,6 +105,7 @@ class ConnectionManager(object):
         try:
             current_connection.handle_read()
         except connection.ConnectionError:
+            raise
             self._on_poller_error(poller, fd)
 
     def _on_poller_write(self, poller, fd):
@@ -112,14 +113,18 @@ class ConnectionManager(object):
         try:
             current_connection.handle_write()
         except connection.ConnectionError:
+            raise
             self._on_poller_error(poller, fd)
 
     def _on_poller_error(self, poller, fd):
-        current_connection = self._fd_to_connection_map[fd]
-
-        current_connection.handle_error()
+        pass
+        # current_connection = self._fd_to_connection_map[fd]
+        # 
+        # current_connection.handle_error()
 
     def _on_connection_established(self, current_connection):
+        self._poller.register_for_read(current_connection.fileno())
+
         current_handler = self._connection_to_handler_map[current_connection]
         current_handler.handle_connect()
 
@@ -139,6 +144,11 @@ class ConnectionManager(object):
         data_stream = current_connection.peek()
 
         current_handler.recv_data(data_stream)
+
+    def _on_command_read(self, current_handler, bytes_read=None):
+        current_connection = self._handler_to_connection_map[current_handler]
+
+        current_connection.recv(bufsize=bytes_read)
 
     def _on_command_write(self, current_handler, data_stream=None):
         assert data_stream is not None, "Missing data_stream"
@@ -185,7 +195,6 @@ class ConnectionManager(object):
         current_fd = current_connection.fileno()
 
         self._fd_to_connection_map[current_fd] = current_connection
-        self._poller.register_for_read(current_fd)
         self._poller.register_for_write(current_fd)
 
         # Establish a connection immediately - check for socket exceptions like: "host not found"
@@ -223,11 +232,13 @@ class ConnectionManager(object):
         return self.command_handler_class(data_encoder=self.data_encoder, event_broker=self._event_broker)
 
     def _setup_command_handler(self, current_handler):
+        self.register_for_event(self._on_command_read, command_handler.EVENT_DATA_READ, current_handler)
         self.register_for_event(self._on_command_write, command_handler.EVENT_DATA_SEND, current_handler)
         return current_handler
 
     def _teardown_command_handler(self, current_handler):
         self.unregister_for_event(self._on_command_write, command_handler.EVENT_DATA_SEND, current_handler)
+        self.unregister_for_event(self._on_command_read, command_handler.EVENT_DATA_READ, current_handler)
         return current_handler
 
     ###################################
