@@ -15,6 +15,9 @@ from gearman.protocol import get_command_name, pack_binary_command, parse_binary
 
 gearman_logger = logging.getLogger(__name__)
 
+STATE_LIVE = 'live'
+STATE_DEAD = 'dead'
+
 EVENT_DATA_READ = 'data_read'
 EVENT_DATA_SEND = 'data_send'
 
@@ -32,18 +35,29 @@ class GearmanCommandHandler(object):
         self.reset()
 
     def handle_connect(self):
-        pass
+        self._state = STATE_LIVE
 
     def handle_disconnect(self):
-        pass
+        self._state = STATE_DEAD
 
     def reset(self):
-        pass
+        self._state = STATE_DEAD
+
+    @property
+    def live(self):
+        return bool(self._state == STATE_LIVE)
+
+    @property
+    def dead(self):
+        return bool(self._state == STATE_LIVE)
 
     #### Interaction with the raw socket ####
     def _notify(self, command_event, *args, **kwargs):
+        self._explicit_notify(self, command_event, *args, **kwargs)
+
+    def _explicit_notify(self, event_source, event_name, *args, **kwargs):
         if self._event_broker:
-            self._event_broker.notify(self, command_event, *args, **kwargs)
+            self._event_broker.notify(event_source, event_name, *args, **kwargs)
 
     def recv_data(self, data_stream):
         current_data_stream = data_stream

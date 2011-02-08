@@ -35,6 +35,9 @@ class NoopEncoder(DataEncoder):
         cls._enforce_byte_string(decodable_string)
         return decodable_string
 
+EVENT_SETUP_COMMAND_HANDLER = 'setup_command_handler'
+EVENT_TEARDOWN_COMMAND_HANDLER = 'teardown_command_handler'
+
 class ConnectionManager(object):
     """Abstract base class for any Gearman-type client that needs to connect/listen to multiple connections
 
@@ -66,6 +69,18 @@ class ConnectionManager(object):
         for hostport_tuple in host_list:
             self.connect_to_host(hostport_tuple)
 
+    @property
+    def fds(self):
+        return tuple(self._fd_to_connection_map.iterkeys())
+
+    @property
+    def connections(self):
+        return tuple(self._connection_pool)
+
+    @property
+    def handlers(self):
+        return tuple(self._handler_to_connection_map.iterkeys())
+
     def connect_to_host(self, hostport_tuple):
         gearman_host, gearman_port = util.disambiguate_server_parameter(hostport_tuple)
         gearman_port = gearman_port or constants.DEFAULT_GEARMAN_PORT
@@ -90,6 +105,12 @@ class ConnectionManager(object):
 
         self._teardown_poller(self._poller)
 
+    def start_polling(self, timeout=None):
+        return self._poller.start(timeout=timeout)
+
+    def stop_polling(self):
+        return self._poller.stop()
+
     def register_for_event(self, callback_fxn, event_name, event_source):
         """Call 'callback_fxn' on 'event_name' coming from 'event_source'"""
         self._event_broker.listen(event_source, event_name, callback_fxn)
@@ -100,37 +121,39 @@ class ConnectionManager(object):
     ###################################
     ##### Event handler functions #####
     ###################################
-    def _on_poller_read(self, poller, fd):
+    def on_poller_read(self, poller, fd):
         current_connection = self._fd_to_connection_map[fd]
         try:
             current_connection.handle_read()
         except connection.ConnectionError:
             raise
-            self._on_poller_error(poller, fd)
+            self.on_poller_error(poller, fd)
 
-    def _on_poller_write(self, poller, fd):
+    def on_poller_write(self, poller, fd):
         current_connection = self._fd_to_connection_map[fd]
         try:
             current_connection.handle_write()
         except connection.ConnectionError:
             raise
-            self._on_poller_error(poller, fd)
+            self.on_poller_error(poller, fd)
 
-    def _on_poller_error(self, poller, fd):
-        pass
-        # current_connection = self._fd_to_connection_map[fd]
-        # 
-        # current_connection.handle_error()
+    def on_poller_error(self, poller, fd):
+        current_connection = self._fd_to_connection_map[fd]
+        
+        current_connection.handle_error()
 
-    def _on_connection_established(self, current_connection):
-        self._poller.register_for_read(current_connection.fileno())
+    def on_connection_established(self, current_connection):
+        current_fd = current_connection.fileno()
+
+        self._poller.unregister(current_fd, poller.EVENT_WRITE)
+        self._poller.register(current_fd, poller.EVENT_READ)
 
         current_handler = self._connection_to_handler_map[current_connection]
-        current_handler.handle_connect()
+        current_handler.handle_setup()
 
-    def _on_connection_lost(self, current_connection):
+    def on_connection_lost(self, current_connection):
         current_handler = self._connection_to_handler_map[current_connection]
-        current_handler.handle_disconnect()
+        current_handler.handle_teardown()
 
         self._teardown_connection(current_connection)
 
@@ -138,19 +161,26 @@ class ConnectionManager(object):
 
         self._setup_connection(current_connection)
 
-    def _on_connection_read(self, current_connection, data_stream=None):
+    def on_connection_read(self, current_connection, data_stream=None):
         current_handler = self._connection_to_handler_map[current_connection]
 
         data_stream = current_connection.peek()
 
         current_handler.recv_data(data_stream)
 
-    def _on_command_read(self, current_handler, bytes_read=None):
+    def on_connection_send(self, current_connection):
+        self._poller.register(current_connection.fileno(), poller.EVENT_WRITE)
+
+    def on_connection_sent(self, current_connection, data_stream=None):
+        if not current_connection.pending_write:
+            self._poller.unregister(current_connection.fileno(), poller.EVENT_WRITE)
+
+    def on_command_read(self, current_handler, bytes_read=None):
         current_connection = self._handler_to_connection_map[current_handler]
 
         current_connection.recv(bufsize=bytes_read)
 
-    def _on_command_write(self, current_handler, data_stream=None):
+    def on_command_write(self, current_handler, data_stream=None):
         assert data_stream is not None, "Missing data_stream"
         
         current_connection = self._handler_to_connection_map[current_handler]
@@ -164,22 +194,16 @@ class ConnectionManager(object):
         return self.poller_class(event_broker=self._event_broker)
 
     def _setup_poller(self, current_poller):
-        self.register_for_event(self._on_poller_read, poller.EVENT_READ, current_poller)
-        self.register_for_event(self._on_poller_write, poller.EVENT_WRITE, current_poller)
-        self.register_for_event(self._on_poller_error, poller.EVENT_ERROR, current_poller)
+        self.register_for_event(self.on_poller_read, poller.EVENT_READ, current_poller)
+        self.register_for_event(self.on_poller_write, poller.EVENT_WRITE, current_poller)
+        self.register_for_event(self.on_poller_error, poller.EVENT_ERROR, current_poller)
         return current_poller
 
     def _teardown_poller(self, current_poller):
-        self.unregister_for_event(self._on_poller_error, poller.EVENT_ERROR, current_poller)
-        self.unregister_for_event(self._on_poller_write, poller.EVENT_WRITE, current_poller)
-        self.unregister_for_event(self._on_poller_read, poller.EVENT_READ, current_poller)
+        self.unregister_for_event(self.on_poller_error, poller.EVENT_ERROR, current_poller)
+        self.unregister_for_event(self.on_poller_write, poller.EVENT_WRITE, current_poller)
+        self.unregister_for_event(self.on_poller_read, poller.EVENT_READ, current_poller)
         return current_poller
-
-    def _poll_until_stopped(self, continue_polling_callback, timeout=None):
-        return self._poller.poll_until_stopped(continue_polling_callback, timeout=timeout)
-
-    def _poll_once(self, timeout=None):
-        return self._poller.poll_once(timeout=timeout)
 
     ###################################
     # Connection management functions #
@@ -195,14 +219,16 @@ class ConnectionManager(object):
         current_fd = current_connection.fileno()
 
         self._fd_to_connection_map[current_fd] = current_connection
-        self._poller.register_for_write(current_fd)
+        self._poller.register(current_fd, poller.EVENT_WRITE)
 
         # Establish a connection immediately - check for socket exceptions like: "host not found"
         current_connection.connect()
 
-        self.register_for_event(self._on_connection_established, connection.EVENT_CONNECTED, current_connection)
-        self.register_for_event(self._on_connection_read, connection.EVENT_PENDING_READ, current_connection)
-        self.register_for_event(self._on_connection_lost, connection.EVENT_DISCONNECTED, current_connection)
+        self.register_for_event(self.on_connection_established, connection.EVENT_CONNECTED, current_connection)
+        self.register_for_event(self.on_connection_read, connection.EVENT_PENDING_READ, current_connection)
+        self.register_for_event(self.on_connection_send, connection.EVENT_PENDING_SEND, current_connection)
+        self.register_for_event(self.on_connection_sent, connection.EVENT_DATA_SENT, current_connection)
+        self.register_for_event(self.on_connection_lost, connection.EVENT_DISCONNECTED, current_connection)
 
         self._connection_pool.add(current_connection)
 
@@ -212,9 +238,11 @@ class ConnectionManager(object):
         assert current_connection in self._connection_pool, "Connection not known: %r" % current_connection
         self._connection_pool.discard(current_connection)
 
-        self.unregister_for_event(self._on_connection_lost, connection.EVENT_DISCONNECTED, current_connection)
-        self.unregister_for_event(self._on_connection_read, connection.EVENT_PENDING_READ, current_connection)
-        self.unregister_for_event(self._on_connection_established, connection.EVENT_CONNECTED, current_connection)
+        self.unregister_for_event(self.on_connection_lost, connection.EVENT_DISCONNECTED, current_connection)
+        self.unregister_for_event(self.on_connection_sent, connection.EVENT_DATA_SENT, current_connection)
+        self.unregister_for_event(self.on_connection_send, connection.EVENT_PENDING_SEND, current_connection)
+        self.unregister_for_event(self.on_connection_read, connection.EVENT_PENDING_READ, current_connection)
+        self.unregister_for_event(self.on_connection_established, connection.EVENT_CONNECTED, current_connection)
 
         old_fd = current_connection.fileno()
 
@@ -232,13 +260,15 @@ class ConnectionManager(object):
         return self.command_handler_class(data_encoder=self.data_encoder, event_broker=self._event_broker)
 
     def _setup_command_handler(self, current_handler):
-        self.register_for_event(self._on_command_read, command_handler.EVENT_DATA_READ, current_handler)
-        self.register_for_event(self._on_command_write, command_handler.EVENT_DATA_SEND, current_handler)
+        self.register_for_event(self.on_command_read, command_handler.EVENT_DATA_READ, current_handler)
+        self.register_for_event(self.on_command_write, command_handler.EVENT_DATA_SEND, current_handler)
+        self._event_broker.notify(current_handler, EVENT_SETUP_COMMAND_HANDLER)
         return current_handler
 
     def _teardown_command_handler(self, current_handler):
-        self.unregister_for_event(self._on_command_write, command_handler.EVENT_DATA_SEND, current_handler)
-        self.unregister_for_event(self._on_command_read, command_handler.EVENT_DATA_READ, current_handler)
+        self._event_broker.notify(current_handler, EVENT_TEARDOWN_COMMAND_HANDLER)
+        self.unregister_for_event(self.on_command_write, command_handler.EVENT_DATA_SEND, current_handler)
+        self.unregister_for_event(self.on_command_read, command_handler.EVENT_DATA_READ, current_handler)
         return current_handler
 
     ###################################

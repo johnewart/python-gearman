@@ -8,11 +8,18 @@ from gearman import util
 
 gearman_logger = logging.getLogger(__name__)
 
+STATE_RUNNING = 'running'
+STATE_STOPPED = 'stopped'
+
 EVENT_READ = 'read'
 EVENT_WRITE = 'write'
 EVENT_ERROR = 'error'
-
 POLLER_EVENTS = set([EVENT_READ, EVENT_WRITE, EVENT_ERROR])
+
+FD that has seen a read
+
+def poll():
+	self.notify_read(fd)
 
 class ConnectionPoller(object):
     """Abstract base class for any Gearman-type client that needs to current_sockect/listen to multiple connections
@@ -25,30 +32,28 @@ class ConnectionPoller(object):
     ###################################
 
     def __init__(self, event_broker=None):
-        self._read_fd_set = set()
-        self._write_fd_set = set()
-        self._entire_fd_set = set()
-
+        self._event_fd_map = compat.defaultdict(set)
         self._event_broker = event_broker
 
-    def register_for_read(self, current_fd):
+    def register(self, current_fd, event_type):
         """Add a new current_sockection to this current_sockection manager"""
-        self._read_fd_set.add(current_fd)
-        self._entire_fd_set.add(current_fd)
+        assert event_type in POLLER_EVENTS
+        self._event_fd_map[event_type].add(current_fd)
 
-    def register_for_write(self, current_fd):
-        self._write_fd_set.add(current_fd)
-        self._entire_fd_set.add(current_fd)
+    def unregister(self, current_fd, event_type=None):
+        if event_type:
+            unregistered_events = [event_type]
+        else:
+            unregistered_events = POLLER_EVENTS
 
-    def unregister(self, current_fd):
-        self._read_fd_set.discard(current_fd)
-        self._write_fd_set.discard(current_fd)
-        self._entire_fd_set.discard(current_fd)
+        for current_event in unregistered_events:
+            self._event_fd_map[current_event].discard(current_fd)
 
     def _notify(self, poller_event, fd):
         if self._event_broker:
             self._event_broker.notify(self, poller_event, fd)
 
+    # Automatically promote fd -> connection -> request
     def notify_read(self, fd):
         self._notify(EVENT_READ, fd)
 
@@ -58,26 +63,31 @@ class ConnectionPoller(object):
     def notify_error(self, fd):
         self._notify(EVENT_ERROR, fd)
 
-    def poll_until_stopped(self, continue_polling_callback, timeout=None):
+    def start(self, timeout=None):
+        self._state = STATE_RUNNING
+
         countdown_timer = util.CountdownTimer(timeout)
+        while self.running and not countdown_timer.expired:
+            self.poll(timeout=countdown_timer.time_remaining)
 
-        callback_ok = continue_polling_callback()
-        timer_ok = bool(not countdown_timer.expired)
+        self._state = STATE_STOPPED
 
-        while bool(callback_ok and timer_ok):
-            self.poll_once(timeout=countdown_timer.time_remaining)
-  
-            callback_ok = continue_polling_callback()
-            timer_ok = bool(not countdown_timer.expired)
+    def stop(self):
+        self._state = STATE_STOPPED
 
-        # Return True, if we were stopped by our callback
-        return bool(not callback_ok)
-
-    def poll_once(self, timeout=None):
+    def poll(self, timeout=None):
         raise NotImplementedError
 
+    @property
+    def running(self):
+        return bool(self._state == STATE_RUNNING)
+
+    @property
+    def stopped(self):
+        return bool(self._state == STATE_STOPPED)
+
 class SelectPoller(ConnectionPoller):
-    def poll_once(self, timeout=None):
+    def poll(self, timeout=None):
         # Do a single robust select and handle all current_sockection activity
         read_fds, write_fds, ex_fds = self._select_poll_once(timeout=timeout)
 
@@ -92,9 +102,10 @@ class SelectPoller(ConnectionPoller):
 
     def _select_poll_once(self, timeout=None):
         """Does a single robust select, catching socket errors"""
-        check_rd_fds = set(self._read_fd_set)
-        check_wr_fds = set(self._write_fd_set)
-        check_ex_fds = set(self._entire_fd_set)
+        check_rd_fds = set(self._event_fd_map[EVENT_READ])
+        check_wr_fds = set(self._event_fd_map[EVENT_WRITE])
+        check_ex_fds = set(self._event_fd_map[EVENT_ERROR])
+        all_fds = check_rd_fds | check_wr_fds | check_ex_fds
 
         actual_rd_fds = set()
         actual_wr_fds = set()
@@ -103,8 +114,7 @@ class SelectPoller(ConnectionPoller):
             return actual_rd_fds, actual_wr_fds, actual_ex_fds
 
         successful_select = False
-        remainings_fds = set(self._entire_fd_set)
-        while not successful_select and compat.any([check_rd_fds, check_rd_fds, check_ex_fds]):
+        while not successful_select and compat.any([check_rd_fds, check_wr_fds, check_ex_fds]):
             try:
                 event_rd_fds, event_wr_fds, event_ex_fds = self.execute_select(check_rd_fds, check_wr_fds, check_ex_fds, timeout=timeout)
                 actual_rd_fds |= set(event_rd_fds)
@@ -117,6 +127,7 @@ class SelectPoller(ConnectionPoller):
                 # We'll need to fish for bad connections as suggested at
                 #
                 # http://docs.python.org/howto/sockets
+                remainings_fds = check_rd_fds | check_wr_fds | check_rd_fds
                 for fd_to_test in remainings_fds:
                     try:
                         _, _, _ = self.execute_select([fd_to_test], [], [], timeout=0.0)
@@ -128,7 +139,7 @@ class SelectPoller(ConnectionPoller):
 
         if _DEBUG_MODE_:
             gearman_logger.debug('select :: Poll - %d :: Read - %d :: Write - %d :: Error - %d', \
-                len(self._entire_fd_set), len(actual_rd_fds), len(actual_wr_fds), len(actual_ex_fds))
+                len(all_fds), len(actual_rd_fds), len(actual_wr_fds), len(actual_ex_fds))
 
         return actual_rd_fds, actual_wr_fds, actual_ex_fds
 

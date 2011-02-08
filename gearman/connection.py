@@ -14,7 +14,6 @@ STATE_INIT = 'init'
 STATE_CONNECTING = 'connecting'
 STATE_CONNECTED = 'connected'
 STATE_DISCONNECTED = 'disconnected'
-
 DISCONNECTED_STATES = set([STATE_INIT, STATE_DISCONNECTED])
 
 EVENT_CONNECTED = 'connected'
@@ -136,16 +135,9 @@ class Connection(object):
         return bool(self._state in DISCONNECTED_STATES)
 
     @property
-    def readable(self):
-        """Returns True if we might have data to read"""
-        return bool(self.connected)
-
-    @property
-    def writable(self):
+    def pending_write(self):
         """Returns True if we have data to write"""
-        connected_and_pending_writes = self.connected and bool(self._outgoing_buffer)
-        connecting_in_progress = self.connecting
-        return bool(connected_and_pending_writes or connecting_in_progress)
+        return self.connected and bool(self._outgoing_buffer)
 
     ########################################################
     ##### Public methods - handling socket events ##########
@@ -171,6 +163,9 @@ class Connection(object):
             sent_buffer = self._send_to_socket()
             if sent_buffer:
                 self._notify(EVENT_DATA_SENT, data_stream=sent_buffer)
+
+    def handle_error(self):
+        pass
 
     ########################################################
     ############### Private support methods  ###############

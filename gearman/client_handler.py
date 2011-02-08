@@ -30,10 +30,10 @@ class GearmanClientCommandHandler(command_handler.GearmanCommandHandler):
         self._requests_awaiting_handles = collections.deque()
         self._handle_to_request_map = dict()
 
-    def handle_connect(self):
+    def handle_setup(self):
         self.reset()
 
-    def handle_disconnect(self):
+    def handle_teardown(self):
         for pending_request in self._requests_awaiting_handles:
             pending_request.state = constants.JOB_UNKNOWN
             self._notify(EVENT_JOB_DISCONNECTED, pending_request)
