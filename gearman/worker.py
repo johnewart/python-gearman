@@ -1,11 +1,9 @@
 import logging
-import random
 import sys
 
 from gearman import compat
 from gearman.connection_manager import GearmanConnectionManager
-from gearman.worker_handler import WorkerConnection, ConnectionError
-from gearman import compat
+from gearman.worker_handler import WorkerConnection
 import gearman.util
 
 gearman_logger = logging.getLogger(__name__)

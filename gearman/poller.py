@@ -16,11 +16,6 @@ EVENT_WRITE = 'write'
 EVENT_ERROR = 'error'
 POLLER_EVENTS = set([EVENT_READ, EVENT_WRITE, EVENT_ERROR])
 
-FD that has seen a read
-
-def poll():
-	self.notify_read(fd)
-
 class ConnectionPoller(object):
     """Abstract base class for any Gearman-type client that needs to current_sockect/listen to multiple connections
 

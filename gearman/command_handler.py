@@ -1,17 +1,9 @@
-import collections
-import errno
-import inspect
 import logging
-import socket
-import struct
-import time
-import sys
 
 from gearman import constants
 from gearman import errors
 from gearman import util
 from gearman import protocol
-from gearman.protocol import get_command_name, pack_binary_command, parse_binary_command, parse_text_command, pack_text_command
 
 gearman_logger = logging.getLogger(__name__)
 
@@ -125,7 +117,7 @@ class GearmanCommandHandler(object):
     def _pack_command(self, cmd_type, cmd_args):
         """Converts a command to its raw binary format"""
         if cmd_type not in protocol.GEARMAN_PARAMS_FOR_COMMAND:
-            raise errors.ProtocolError('Unknown command: %r' % get_command_name(cmd_type))
+            raise errors.ProtocolError('Unknown command: %r' % protocol.get_command_name(cmd_type))
 
         if constants._DEBUG_MODE_:
             gearman_logger.debug('%s - Send - %s - %r', hex(id(self)), protocol.get_command_name(cmd_type), cmd_args)

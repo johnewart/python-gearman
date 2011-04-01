@@ -1,9 +1,6 @@
 import errno
 import socket
 import struct
-import time
-
-from gearman import util
 
 class ConnectionError(Exception):
     pass

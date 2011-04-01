@@ -18,55 +18,29 @@ RANDOM_UNIQUE_BYTES = 16
 
 EVENT_AWAITING_VALID_CONNECTION = 'awaiting_valid_connection'
 
-# I have a ConnectionManager M
-# M = ConnectionManager(gearmanconfig = {'host' list of host ports)})
-# I want to call jobs named "do_foo"
-# I inherit from something and make something that handles foo jobs result/fails
-#
-# class FooHandler(GearmanSpecificAPI):
-#      def on_fail(conn)
-#      def on_success(conn,result)
-#      def on_io_fail(conn,...)
-# 
-
-cm = ConnectionManager()
-for command_handler in all_handlers:
-	cm._register_for_event(my_callback, ON_FAILURE, current_handlre)
-
-
-# I'm reading data from someone who connected to my port 80. I need to do foo.
-# handler = FooHandler()
-# conn = M.send_job ('foo', blob, handler, blocking=True)
-# fd = conn.fileno
-
-# IOloopmethod
-# ... ioloop (fd)
-# if fd is read|write...
-# M.on_read(fd) | M.on_write(fd)
-
-# M.handle(conn)
-
-# that should cause calls into handler
-
-#    def send_my_info(self, task_name, job_blob)
-#        fd -> connection
-#        connection -> handler [state machine]
-#        handler.send_job_request()
-
-
 class GearmanClient(object):
     """
     GearmanClient :: Interface to submit jobs to a Gearman server
     """
     job_class = job.GearmanJob
     job_request_class = job.GearmanJobRequest
-    command_handler_class = client_handler.GearmanClientCommandHandler
 
-    _retryon_failure = False
+    _retry_on_failure = False
 
     def __init__(self, host_list=None, random_unique_bytes=RANDOM_UNIQUE_BYTES):
-        self._connection_manager = connection_manager.ConnectionManager(host_list=host_list)
+        self._event_callback_map = {
+            client_handler.EVENT_JOB_DISCONNECTED: self.on_job_disconnect,
+            client_handler.EVENT_JOB_EXCEPTION: self.on_job_exception,
+            client_handler.EVENT_JOB_DATA: self.on_job_data,
+            client_handler.EVENT_JOB_WARNING: self.on_job_warning,
+            client_handler.EVENT_JOB_STATUS: self.on_job_status,
+            client_handler.EVENT_JOB_COMPLETE: self.on_job_complete,
+            client_handler.EVENT_JOB_FAIL: self.on_job_fail,
+            client_handler.EVENT_STATUS_RES: self.on_status_update,
+            client_handler.EVENT_GEARMAN_ERROR: self.on_gearman_error,
+        }
 
+        self._connection_manager = self._setup_connection_manager(host_list=host_list)
         self._random_unique_bytes = random_unique_bytes
 
         # The authoritative copy of all requests that this client knows about
@@ -105,29 +79,34 @@ class GearmanClient(object):
         You MUST check the status of your requests after calling this function as "timed_out" or "state == JOB_UNKNOWN" maybe True
         """
         assert type(job_requests) in (list, tuple, set), "Expected multiple job requests, received 1?"
-        for current_request in job_requests:
-            self._requests_awaiting_attempt.append(current_request)
 
         assert not self._requests_in_flight, "Cannot have multiple objects in flight"
-        self._requests_in_flight = job_requests
+        self._requests_in_flight = set(job_requests)
 
         if wait_until_complete:
             pending_event = client_handler.EVENT_JOB_COMPLETE
         else:
             pending_event = client_handler.EVENT_JOB_ACCEPTED
 
-        self._register_for_event(evict_request_when_done, pending_event, current_handler)
+        for current_handler in self._connection_manager.handlers:
+            self._register_for_event(self._evict_request_when_done, pending_event, current_handler)
+
+        # Register these requests with the client and queue them up for sends
+        for current_request in job_requests:
+            self._register_request(current_request)
+            self._send_job_request(current_request)
 
         # Enter IOLoop and fire off a bunch of events
         self._connection_manager.start_polling(timeout=poll_timeout)
 
-        self._unregister_for_event(evict_request_when_done, pending_event, current_handler)
+        # Once we've exited the polling loop, we should clean up after ourselves
+        for current_handler in self._connection_manager.handlers:
+            self._unregister_for_event(self._evict_request_when_done, pending_event, current_handler)
 
         for current_request in self._requests_in_flight:
             current_request.timeout = True
 
         self._requests_in_flight = set()
-
         return job_requests
 
     def _evict_request_when_done(self, current_handler, current_request):
@@ -203,6 +182,19 @@ class GearmanClient(object):
         current_request = self.job_request_class(current_job, initial_priority=initial_priority, background=background, max_attempts=max_attempts)
         return current_request
 
+    def _register_request(self, current_request):
+        """When registering a request, keep track of which connections we've already tried submitting to"""
+        if current_request in self._request_to_handler_queue:
+            return
+
+        # Always start off this task on the same server if possible
+        shuffled_handlers = list(self._connection_manager.handlers)
+        random.shuffle(shuffled_handlers)
+        self._request_to_handler_queue[current_request] = collections.deque(shuffled_handlers)
+
+    def _unregister_request(self, current_request):
+        self._request_to_handler_queue.pop(current_request, None)
+
     def _send_job_request(self, current_request):
         """Attempt to send out a job request"""
         chosen_handler = self._choose_handler(current_request)
@@ -217,6 +209,7 @@ class GearmanClient(object):
 
         failed_handlers = 0
         chosen_handler = None
+        import ipdb; ipdb.set_trace()
         for possible_handler in rotating_handlers:
             if possible_handler.live:
                 chosen_handler = possible_handler
@@ -230,21 +223,6 @@ class GearmanClient(object):
             raise Exception(self._connection_manager.handlers)
 
         return chosen_handler
-
-    def _register_request(self, current_request):
-        """When registering a request, keep track of which connections we've already tried submitting to"""
-        if current_request in self._request_to_handler_queue:
-            return
-
-        # Always start off this task on the same server if possible
-        shuffled_handlers = list(self._connection_manager.handlers)
-        random.shuffle(shuffled_handlers)
-        self._request_to_handler_queue[current_request] = collections.deque(shuffled_handlers)
-
-        self._notify_awaiting_job_attempt(current_request)
-
-    def _unregister_request(self, current_request):
-        self._request_to_handler_queue.pop(current_request, None)
 
     ###################################
     ##### Event handler functions #####
@@ -265,13 +243,11 @@ class GearmanClient(object):
         pass
 
     def on_job_complete(self, current_handler, current_request):
-        self._requests_pending_complete.discard(current_request)
         self._unregister_request(current_request)
 
     def on_job_fail(self, current_handler, current_request):
-        self._requests_pending_fail.discard(current_request)
-        if self._retryon_failure:
-            self._notify_awaiting_job_attempt(current_request)
+        if self._retry_on_failure:
+            self._send_job_request(current_request)
         else:
             self._unregister_request(current_request)
 
@@ -281,6 +257,9 @@ class GearmanClient(object):
     def on_gearman_error(self, current_handler, *args, **kwargs):
         pass
 
+    ###################################
+    # Command handler mgmt functions ##
+    ###################################
     def _register_for_event(self, callback_fxn, event_name, event_source):
         """Call 'callback_fxn' on 'event_name' coming from 'event_source'"""
         self._connection_manager.register_for_event(event_source, event_name, callback_fxn)
@@ -288,27 +267,18 @@ class GearmanClient(object):
     def _unregister_for_event(self, callback_fxn, event_name, event_source):
         self._connection_manager.unregister_for_event(event_source, event_name, callback_fxn)
 
-    ###################################
-    # Command handler mgmt functions ##
-    ###################################
-    def setup_event_listeners(self, command_handler, command_handler=None):
-        self._register_for_event(self.on_job_disconnect, client_handler.EVENT_JOB_DISCONNECTED, command_handler)
-        self._register_for_event(self.on_job_exception, client_handler.EVENT_JOB_EXCEPTION, command_handler)
-        self._register_for_event(self.on_job_data, client_handler.EVENT_JOB_DATA, command_handler)
-        self._register_for_event(self.on_job_warning, client_handler.EVENT_JOB_WARNING, command_handler)
-        self._register_for_event(self.on_job_status, client_handler.EVENT_JOB_STATUS, command_handler)
-        self._register_for_event(self.on_job_complete, client_handler.EVENT_JOB_COMPLETE, command_handler)
-        self._register_for_event(self.on_job_fail, client_handler.EVENT_JOB_FAIL, command_handler)
-        self._register_for_event(self.on_status_update, client_handler.EVENT_STATUS_RES, command_handler)
-        self._register_for_event(self.on_gearman_error, client_handler.EVENT_GEARMAN_ERROR, command_handler)
+    def _setup_connection_manager(self, host_list=None):
+        self._connection_manager = connection_manager.ConnectionManager(host_list=host_list, command_handler_class=client_handler.GearmanClientCommandHandler)
 
-    def teardown_event_listeners(self, connection_manager, command_handler=None):
-        self._unregister_for_event(self.on_gearman_error, client_handler.EVENT_GEARMAN_ERROR, command_handler)
-        self._unregister_for_event(self.on_status_update, client_handler.EVENT_STATUS_RES, command_handler)
-        self._unregister_for_event(self.on_job_fail, client_handler.EVENT_JOB_FAIL, command_handler)
-        self._unregister_for_event(self.on_job_complete, client_handler.EVENT_JOB_COMPLETE, command_handler)
-        self._unregister_for_event(self.on_job_status, client_handler.EVENT_JOB_STATUS, command_handler)
-        self._unregister_for_event(self.on_job_warning, client_handler.EVENT_JOB_WARNING, command_handler)
-        self._unregister_for_event(self.on_job_data, client_handler.EVENT_JOB_DATA, command_handler)
-        self._unregister_for_event(self.on_job_exception, client_handler.EVENT_JOB_EXCEPTION, command_handler)
-        self._unregister_for_event(self.on_job_disconnect, client_handler.EVENT_JOB_DISCONNECTED, command_handler)
+        for current_handler in self._connection_manager.handlers:
+            self._setup_event_listeners(current_handler)
+
+        return self._connection_manager
+
+    def _setup_event_listeners(self, command_handler):
+        for event_name, event_callback in self._event_callback_map.iteritems():
+            self._register_for_event(event_callback, event_name, command_handler)
+
+    def _teardown_event_listeners(self, command_handler):
+        for event_name, event_callback in self._event_callback_map.iteritems():
+            self._unregister_for_event(event_callback, event_name, command_handler)

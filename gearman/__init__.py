@@ -8,7 +8,7 @@ __version__ = '2.0.2.development-async'
 from gearman.client import GearmanClient
 # from gearman.worker import GearmanWorker
 
-from gearman.connection_manager import DataEncoder
+from gearman.encoder import DataEncoder
 from gearman.constants import PRIORITY_NONE, PRIORITY_LOW, PRIORITY_HIGH, JOB_PENDING, JOB_CREATED, JOB_FAILED, JOB_COMPLETE
 
 import logging

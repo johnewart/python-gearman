@@ -2,10 +2,6 @@
 """
 Gearman Client Utils
 """
-import errno
-import inspect
-import functools
-import select as select_lib
 import time
 
 from gearman import compat
